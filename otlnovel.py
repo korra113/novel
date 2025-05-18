@@ -1,38 +1,67 @@
-import logging
-import json
-import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaAnimation, InputMediaAudio, Message, InputMediaDocument, InputFile
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CallbackContext,
+import telegram.error
+from telegram import (
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+    InputMediaAnimation,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+    Message,
+    Update,
 )
 from telegram.constants import ParseMode
-import uuid
-from uuid import uuid4
-import asyncio
-import telegram.error
-from telegram.error import BadRequest
-from collections import defaultdict
-import networkx as nx
-import matplotlib.pyplot as plt
-import tempfile
-import html
-import re
+from telegram.error import BadRequest, Forbidden, TelegramError, TimedOut
+from telegram.ext import (
+    Application,
+    CallbackContext,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    InlineQueryHandler,
+    MessageHandler,
+    filters,
+)
 from telegram.helpers import escape, mention_html
-from asyncio import create_task, sleep
-from telegram import Bot
-from io import BytesIO # Для отправки файла
+
+
+import asyncio
+import colorsys
+import copy
+import html
+import json
+import logging
 import math
+import os
+import random
+import re
+import tempfile
+import time
+from asyncio import create_task, sleep
+from collections import defaultdict
+from datetime import datetime
+from io import BytesIO
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
+from uuid import uuid4
+
+import firebase_admin
+from firebase_admin import credentials, db
+
+
+import networkx as nx
+
+import graphviz as gv
+
+from background import keep_alive
+
 from google import genai
-from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
 from google.genai import types
-from google import genai
 from google.genai.types import (
     FunctionDeclaration,
     GenerateContentConfig,
@@ -40,17 +69,8 @@ from google.genai.types import (
     Part,
     Retrieval,
     SafetySetting,
-    Tool
+    Tool,
 )
-from typing import Optional, Dict, Any, List, Set
-from telegram.error import Forbidden, TelegramError, TimedOut
-import random
-import time
-import copy
-import firebase_admin
-from firebase_admin import credentials, db
-from pathlib import Path
-
 
 
 GOOGLE_API_KEY = "AIzaSyCJ9lom_jgT-SUHGG-UYrrcpuWn7s8081g"
@@ -1028,9 +1048,7 @@ async def receive_coop_user_id_to_remove(update: Update, context: ContextTypes.D
 
 # --- Основные обработчики ---
 
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+
 # Убедитесь, что эти импорты и функции/переменные доступны в области видимости start
 # from your_data_logic_file import load_data # Ваша функция для загрузки данных
 # from your_story_player_file import render_fragment, active_timers # Ваша функция для отображения фрагмента и active_timers
@@ -1154,9 +1172,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return  # В группе — просто молча игнорируем
 
 
-from telegram import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import InlineQueryHandler
-from uuid import uuid4
+
 
 
 
@@ -3883,8 +3899,7 @@ async def handle_neuralstart_story_callback(update: Update, context: ContextType
         f"🎮 Запуск истории готов для пользователя: {username_display}.\n\n{story_info}\n\nНажмите кнопку ниже, чтобы начать играть:",
         reply_markup=keyboard
     )
-import os
-from datetime import datetime
+
 
 DEBUG_DIR = "stories_debug"
 os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -4722,7 +4737,6 @@ async def confirm_delete_choice(update: Update, context: ContextTypes.DEFAULT_TY
     media_desc = ""
     current_media = fragment.get("media", [])
     if current_media:
-        from collections import defaultdict
         media_counts = defaultdict(int)
         for item in current_media:
             media_counts[item.get("type", "unknown")] += 1
@@ -6093,12 +6107,7 @@ async def reorder_choice_cancel(update: Update, context: ContextTypes.DEFAULT_TY
 #==========================================================================
 #ЛОГИКА КАРТЫ
 
-import pydot
-from networkx.drawing.nx_pydot import graphviz_layout
-import graphviz as gv
 
-import colorsys
-import random
 
 def generate_branch_colors(fragments):
     """Генерирует уникальный цвет для каждой ветки"""
@@ -6786,7 +6795,7 @@ async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 
-from typing import Optional, Dict, Any, List
+
 
 
 # --- Логика создания истории (ConversationHandler) ---
@@ -8141,7 +8150,7 @@ def main() -> None:
 
     # ⬇️ Важно: обработчик любого текста вне диалога, вызывает start
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
-
+    keep_alive()#запускаем flask-сервер в отдельном потоке. Подробнее ниже...
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
