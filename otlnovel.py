@@ -85,20 +85,12 @@ logger = logging.getLogger(__name__)
 
 # --- Константы ---
 BOT_TOKEN = "7923930676:AAEkCg6-E35fyRnAzvxqoZvgEo8o8KTT8EU"  # <-- ЗАМЕНИ НА СВОЙ ТОКЕН БОТА
-DATA_FILE = "stories_data.json"
 
 
-
-# Инициализация Firebase
-base_dir = os.path.dirname(os.path.abspath(__file__))
-cred_path = os.path.join(base_dir, 'config/otlzhka-firebase-adminsdk-3y2mj-948ad0bebc.json')
-
-# Инициализация Firebase
-cred = credentials.Certificate(cred_path)
+cred = credentials.Certificate('/etc/secrets/firebase-key.json')  # Путь к вашему JSON файлу
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://otlzhka-default-rtdb.europe-west1.firebasedatabase.app/'  # Замените на URL вашей базы данных
 })
-
 
 # Состояния для ConversationHandler (создание истории)
 # Существующие состояния + новое
