@@ -1064,6 +1064,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_type = update.effective_chat.type if update.effective_chat else "private"
 
     # Групповой чат: реагировать только на foxstart или ID истории
+    # 👇 ДОПОЛНЕНИЕ: если личка и просто текст — считаем его аргументом
+    if chat_type == "private" and not context.args and message_text:
+        context.args = [message_text]
+
+    # Групповой чат: реагировать только на foxstart или ID истории
     if chat_type != "private":
         # Загрузка всех историй для проверки ID
         all_data = load_data()
@@ -1085,10 +1090,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Проверка: это ID истории?
         for uid, stories in users_story.items():
             if message_text in stories:
-                context.args = [message_text]  # Подставим ID как аргумент
-                break
-        else:
-            return  # Ни foxstart, ни ID — игнорируем
+                story_data = stories[message_text]
+                title = story_data.get("title", "Без названия")
+                neural = story_data.get("neural", False)
+                author = story_data.get("author", "неизвестен")
+
+                info = f"📖 История: «{title}»\n✍️ Автор: {author}"
+                if neural:
+                    info += " (нейроистория)"
+
+                suffix = f"{user_id_str}_{message_text}_main_1"
+                callback_data = f"nstartstory_{suffix}"
+
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶️ Открыть", callback_data=callback_data)]
+                ])
+                await update.effective_message.reply_text(
+                    f"🎮 Обнаружена история.\n\n{info}\n\nНажмите кнопку ниже, чтобы вызвать своё персональное сообщение для прохождения в нём этой истории:\n\n<i>(обратите внимание что если автор вызовет эту историю через @FoxNovel_bot то можно настроить совместное прохождение в одном окне, тогда выборы будут делаться по голосам)</i>",
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML
+                )
+                return
+        return  # Ни foxstart, ни ID — игнорируем
     else:
         # Приватный чат — любые сообщения могут быть ID истории
         if not context.args and message_text:
@@ -1127,7 +1150,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
                     await render_fragment(
                         context=context,
-                        user_id=int(story_owner_id),
+                        user_id=user_id_str,                        
+                        owner_id=int(story_owner_id),
                         story_id=story_id_to_start,
                         fragment_id=first_fragment_id,
                         message_to_update=placeholder_message,
@@ -1163,6 +1187,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             else:
                 return  # В группе — просто молча игнорируем
+
+
+
 
 
 
@@ -1345,62 +1372,15 @@ async def handle_delete_fragment_execute(update: Update, context: ContextTypes.D
             return EDIT_STORY_MAP
 
         # Шаг 2: Поиск внешних ссылок на фрагменты в поддереве
-        externally_referenced = set()
-        for fid, frag_content in all_fragments.items():
-            if fid not in full_deletion_tree: # Если фрагмент НЕ в поддереве удаления
-                for choice in frag_content.get("choices", []):
-                    if choice.get("target") in full_deletion_tree:
-                        externally_referenced.add(choice["target"])
+        fragments_preview_for_deletion, externally_referenced_in_subtree, descendants_to_list, bypass_reachable = get_fragments_for_deletion_preview(
+                    all_fragments=all_fragments,
+                    target_fragment_id=target_fragment_id,
+                    potential_full_subtree=full_deletion_tree,
+                    protected_fragment_id=PROTECTED_FRAGMENT_ID,
+                )
 
         # Шаг 3: Определяем окончательный список fragments_to_delete.
-        # Корень (target_fragment_id) всегда удаляется.
-        # Остальные удаляются, если они не externally_referenced И их "родитель" (через который мы к ним пришли) в дереве full_deletion_tree тоже удаляется.
-        fragments_to_delete = set()
-        
-        # Используем DFS-подобную логику для построения fragments_to_delete
-        # Стек для элементов, которые нужно проверить: (fragment_id)
-        processing_stack = []
-
-        if target_fragment_id in all_fragments: # Убедимся, что целевой фрагмент всё ещё существует
-            processing_stack.append(target_fragment_id)
-        else: # Маловероятно, если прошло проверку выше, но для безопасности
-            await query.edit_message_text(f"Фрагмент {target_fragment_id} не найден непосредственно перед удалением.")
-            return EDIT_STORY_MAP
-
-        visited_for_final_decision = set() # Чтобы избежать повторной обработки в этом цикле
-
-        while processing_stack:
-            current_f_id_to_process = processing_stack.pop()
-
-            if current_f_id_to_process in visited_for_final_decision:
-                continue
-            visited_for_final_decision.add(current_f_id_to_process)
-
-            # --- ДОБАВЛЕНО: Никогда не помечаем PROTECTED_FRAGMENT_ID к удалению ---
-            if current_f_id_to_process == PROTECTED_FRAGMENT_ID:
-                continue # Пропускаем, main_1 не удаляется
-
-            should_delete_this_node = False
-            if current_f_id_to_process == target_fragment_id: # Цель удаляется (если это не PROTECTED_FRAGMENT_ID, что проверено выше)
-                should_delete_this_node = True
-            elif current_f_id_to_process not in externally_referenced:
-                should_delete_this_node = True
-
-            if should_delete_this_node:
-                fragments_to_delete.add(current_f_id_to_process)
-
-                current_fragment_content = all_fragments.get(current_f_id_to_process, {})
-                direct_children_ids = [c["target"] for c in current_fragment_content.get("choices", [])]
-
-                for child_id in direct_children_ids:
-                    # --- ДОБАВЛЕНО: Не добавляем PROTECTED_FRAGMENT_ID в стек для дальнейшей обработки на удаление ---
-                    if child_id == PROTECTED_FRAGMENT_ID:
-                        continue
-
-                    if child_id in full_deletion_tree and child_id not in visited_for_final_decision:
-                        processing_stack.append(child_id)
-            # Если should_delete_this_node is False (т.е. это не корень и он externally_referenced),
-            # то мы его не удаляем и не рассматриваем его детей для удаления через эту ветку.
+        fragments_to_delete = fragments_preview_for_deletion
 
         if not fragments_to_delete or target_fragment_id not in fragments_to_delete:
             await query.edit_message_text(f"Фрагмент {target_fragment_id} не удалось подготовить к удалению (возможно, он защищен или уже удален).")
@@ -1416,6 +1396,8 @@ async def handle_delete_fragment_execute(update: Update, context: ContextTypes.D
                 deleted_count += 1
                 logger.info(f"Удален фрагмент {frag_id}...")
 
+
+        
         # --- ОЧЕНЬ ВАЖНО: Очистка ссылок в родительских (оставшихся) фрагментах ---
         fragments_to_delete_set = set(fragments_to_delete) # для быстрой проверки
         for frag_id, fragment_content in list(all_fragments.items()):
@@ -1563,6 +1545,32 @@ async def safe_edit_or_resend(query, context, text, reply_markup=None, parse_mod
             parse_mode=parse_mode
         )
 
+def can_reach_without_target(all_fragments, start_id, target_ids, forbidden_id):
+    """
+    Проверяет, можно ли из start_id дойти до любого из target_ids, минуя forbidden_id.
+    """
+    stack = [start_id]
+    visited = set()
+
+    while stack:
+        current = stack.pop()
+        if current in visited or current == forbidden_id:
+            continue
+        visited.add(current)
+
+        if current in target_ids:
+            return True  # Дошли до одной из целей, не проходя через forbidden_id
+
+        for choice in all_fragments.get(current, {}).get("choices", []):
+            target = choice.get("target")
+            if target and target not in visited:
+                stack.append(target)
+
+    return False
+
+
+
+
 async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
     query = update.callback_query
     await query.answer()
@@ -1615,66 +1623,28 @@ async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.D
             await safe_edit_or_resend(query, context, f"Ошибка: Фрагмент <code>{target_fragment_id}</code> не найден.", parse_mode=ParseMode.HTML)
             return EDIT_STORY_MAP
 
+        logging.info(f"🔍 Начинается поиск потомков для удаления от фрагмента {target_fragment_id}")
+
         potential_full_subtree = find_descendant_fragments(all_fragments, target_fragment_id)
         if not potential_full_subtree:
             await safe_edit_or_resend(query, context, f"Ошибка: Фрагмент <code>{target_fragment_id}</code> не найден или не имеет потомков для анализа.", parse_mode=ParseMode.HTML)
             return EDIT_STORY_MAP
-            
-        externally_referenced_in_subtree = set()
-        for fid, fragment_content in all_fragments.items():
-            if fid not in potential_full_subtree:
-                for choice in fragment_content.get("choices", []):
-                    choice_target = choice.get("target")
-                    if not choice_target:
-                        continue
-                    if choice_target in potential_full_subtree:
-                        externally_referenced_in_subtree.add(choice_target)
-        
-        # --- БОЛЕЕ ТОЧНЫЙ РАСЧЕТ fragments_preview_for_deletion ---
-        fragments_preview_for_deletion = set()
-        preview_processing_stack = []
 
-        if target_fragment_id in all_fragments: # target_fragment_id уже проверен на PROTECTED_FRAGMENT_ID
-            preview_processing_stack.append(target_fragment_id)
-        else: # Маловероятно, но для безопасности
+
+        if target_fragment_id not in all_fragments:
             await safe_edit_or_resend(query, context, f"Ошибка: Целевой фрагмент <code>{target_fragment_id}</code> не найден перед формированием превью.", parse_mode=ParseMode.HTML)
             return EDIT_STORY_MAP
 
-        visited_for_preview = set()
+        fragments_preview_for_deletion, externally_referenced_in_subtree, descendants_to_list, bypass_reachable = get_fragments_for_deletion_preview(
+            all_fragments=all_fragments,
+            target_fragment_id=target_fragment_id,
+            potential_full_subtree=potential_full_subtree,
+            protected_fragment_id=PROTECTED_FRAGMENT_ID,
+        )
 
-        while preview_processing_stack:
-            current_preview_f_id = preview_processing_stack.pop()
-
-            if current_preview_f_id in visited_for_preview:
-                continue
-            visited_for_preview.add(current_preview_f_id)
-
-            if current_preview_f_id == PROTECTED_FRAGMENT_ID:
-                continue 
-
-            should_be_in_preview = False
-            if current_preview_f_id == target_fragment_id:
-                should_be_in_preview = True
-            elif current_preview_f_id not in externally_referenced_in_subtree:
-                should_be_in_preview = True
-            
-            if should_be_in_preview:
-                fragments_preview_for_deletion.add(current_preview_f_id)
-                
-                current_fragment_content = all_fragments.get(current_preview_f_id, {})
-                direct_children_ids = [choice.get("target") for choice in current_fragment_content.get("choices", [])]
-
-                for child_id in direct_children_ids:
-                    if child_id == PROTECTED_FRAGMENT_ID:
-                        continue 
-                    if child_id in potential_full_subtree and child_id not in visited_for_preview:
-                         preview_processing_stack.append(child_id)
-        
-        descendants_to_list = sorted([
-            f for f in fragments_preview_for_deletion 
-            if f != target_fragment_id
-        ])
+        logging.info(f"📋 Финальный список фрагментов на удаление (без корневого): {descendants_to_list}")
         # --- КОНЕЦ БОЛЕЕ ТОЧНОГО РАСЧЕТА ---
+
 
         confirmation_text = f"Вы уверены, что хотите удалить фрагмент <code>{target_fragment_id}</code>?\n\n"
         
@@ -1691,7 +1661,7 @@ async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.D
 
 
         if target_fragment_id in externally_referenced_in_subtree and target_fragment_id in fragments_preview_for_deletion:
-            confirmation_text += f"\n\n❗️Внимание: На сам фрагмент <code>{target_fragment_id}</code> есть внешние ссылки. Он все равно будет удален (так как является целью), но это может нарушить логику истории."
+            confirmation_text += f"\n\n❗️Внимание: ссылки(кнопки) на удаляемые фрагменты так же будут удалены."
 
         confirmation_text += "\n\nЭто действие нельзя отменить."
 
@@ -1701,11 +1671,12 @@ async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.D
                 InlineKeyboardButton("❌ Нет, отмена", callback_data=f"edit_story_{owner_id_str}_{story_id}")
             ]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+
 
         # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ДЛЯ КАРТЫ ---
         # Используем УТОЧНЕННЫЙ набор highlight_ids (fragments_preview_for_deletion)
-        highlight_set_for_map = fragments_preview_for_deletion 
+        highlight_set_for_map = fragments_preview_for_deletion
+
         total_fragments = len(all_fragments)
         # --- КОНЕЦ КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
 
@@ -1715,11 +1686,16 @@ async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.D
             except Exception as e_del:
                 logger.warning(f"Не удалось удалить сообщение перед подтверждением: {e_del}")
 
-        if total_fragments > 20: # Порог для отправки карты как изображения
+        if total_fragments > 20:
             confirmation_text += (
                 "\n\n📌 История содержит более 20 фрагментов, схема не прикреплена к этому сообщению. "
                 "Вы можете отдельно запросить её."
             )
+            keyboard.insert(0, [  # Кнопка будет в отдельной строке над остальными
+                InlineKeyboardButton("🗺️ Показать карту удаляемой ветки", callback_data=f"mapreq_{story_id}_{target_fragment_id}")
+            ])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)           
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=confirmation_text,
@@ -1727,6 +1703,8 @@ async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.D
                 parse_mode=ParseMode.HTML
             )
         else:
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            logging.info(f"highlight_set_for_map: {highlight_set_for_map}")            
             image_path = generate_story_map(story_id, story_data, highlight_set_for_map) # Передаем уточне_set
             if image_path and os.path.exists(image_path):
                 try:
@@ -1765,6 +1743,91 @@ async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.D
         if query:
             await safe_edit_or_resend(query, context, "Произошла ошибка при запросе на удаление фрагмента.")
         return EDIT_STORY_MAP
+
+
+
+
+
+def get_fragments_for_deletion_preview(
+    all_fragments: dict,
+    target_fragment_id: str,
+    potential_full_subtree: set,
+    protected_fragment_id: str
+) -> tuple[set, set, list, set]:
+    logging.info(f"Найдено {len(potential_full_subtree)} потенциальных потомков фрагмента {target_fragment_id}")
+
+    externally_referenced_in_subtree = set()
+    for fid, fragment_content in all_fragments.items():
+        if fid not in potential_full_subtree:
+            for choice in fragment_content.get("choices", []):
+                choice_target = choice.get("target")
+                if choice_target in potential_full_subtree:
+                    externally_referenced_in_subtree.add(choice_target)
+                    logging.info(f"Фрагмент {choice_target} используется вне поддерева, из фрагмента {fid}")
+
+    fragments_preview_for_deletion = set()
+    preview_processing_stack = [target_fragment_id] if target_fragment_id in all_fragments else []
+    visited_for_preview = set()
+
+    bypass_reachable = set()
+    for fragment_id in potential_full_subtree:
+        if fragment_id != target_fragment_id:
+            if can_reach_without_target(all_fragments, protected_fragment_id, {fragment_id}, target_fragment_id):
+                bypass_reachable.add(fragment_id)
+                logging.info(f"⚠️ Фрагмент {fragment_id} достижим напрямую из {protected_fragment_id}, минуя {target_fragment_id}")
+
+    while preview_processing_stack:
+        current_preview_f_id = preview_processing_stack.pop()
+
+        if current_preview_f_id in visited_for_preview:
+            continue
+        visited_for_preview.add(current_preview_f_id)
+
+        if current_preview_f_id == protected_fragment_id:
+            logging.info(f"⛔ Пропущен защищённый фрагмент {current_preview_f_id}")
+            continue
+
+        protected_fragment = all_fragments.get(protected_fragment_id)
+        if protected_fragment:
+            for choice in protected_fragment.get("choices", []):
+                choice_target = choice.get("target")
+                if choice_target in potential_full_subtree:
+                    externally_referenced_in_subtree.add(choice_target)
+                    logging.info(f"Фрагмент {choice_target} используется в защищённом фрагменте {protected_fragment_id}")
+
+        if current_preview_f_id in bypass_reachable:
+            logging.info(f"⛔ Фрагмент {current_preview_f_id} не будет удалён — достижим напрямую из защищённого фрагмента")
+            continue
+
+        should_be_in_preview = (
+            current_preview_f_id == target_fragment_id or 
+            current_preview_f_id not in externally_referenced_in_subtree
+        )
+
+        if should_be_in_preview:
+            reason = "это целевой фрагмент" if current_preview_f_id == target_fragment_id else "не используется вне поддерева"
+            fragments_preview_for_deletion.add(current_preview_f_id)
+            logging.info(f"✅ Фрагмент {current_preview_f_id} добавлен в список на удаление ({reason})")
+
+            current_fragment_content = all_fragments.get(current_preview_f_id, {})
+            direct_children_ids = [choice.get("target") for choice in current_fragment_content.get("choices", [])]
+
+            for child_id in direct_children_ids:
+                if child_id in visited_for_preview or child_id == protected_fragment_id:
+                    continue
+                if child_id in potential_full_subtree:
+                    logging.info(f"🔽 Потомок {child_id} добавлен в стек на проверку")
+                    preview_processing_stack.append(child_id)
+                else:
+                    logging.info(f"⚠️ Потомок {child_id} не входит в поддерево, пропущен")
+
+    descendants_to_list = sorted([
+        f for f in fragments_preview_for_deletion 
+        if f != target_fragment_id
+    ])
+    logging.info(f"📋 Финальный список фрагментов на удаление (без корневого): {descendants_to_list}")
+
+    return fragments_preview_for_deletion, externally_referenced_in_subtree, descendants_to_list, bypass_reachable
 
 
 
@@ -2051,7 +2114,14 @@ FRAGMENT_BUTTONS_PER_PAGE = 16 # Пример: сколько фрагменто
 # --- Константа для компоновки ---
 PAIRS_PER_ROW = 1 # Сколько пар кнопок (Редакт.+Удалить) помещать в один ряд
 
-def build_fragment_keyboard(user_id_str: str, story_id: str, fragment_ids: list[str], current_page: int, story_data: dict) -> 'InlineKeyboardMarkup':
+def build_fragment_keyboard(
+    user_id_str: str,
+    story_id: str,
+    fragment_ids: list[str],
+    current_page: int,
+    story_data: dict,
+    legend_too_long: bool = False
+) -> 'InlineKeyboardMarkup':
     """
     Строит InlineKeyboardMarkup для списка фрагментов с учетом пагинации,
     кнопками редактирования/удаления, публичности и скачивания.
@@ -2141,7 +2211,7 @@ def build_fragment_keyboard(user_id_str: str, story_id: str, fragment_ids: list[
                 pagination_row.append(InlineKeyboardButton(" ", callback_data="ignore_"))
 
             keyboard.append(pagination_row)
-    if len(sorted_fragment_ids) > 15:
+    if len(sorted_fragment_ids) > 15 or legend_too_long:
         keyboard.append([
             InlineKeyboardButton("🗺️ Посмотреть карту", callback_data=f"show_map_{story_id}")
         ])
@@ -2856,6 +2926,83 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 ))
 
 
+    elif data.startswith('mapreq_'):
+
+        pattern = r"^mapreq_([a-zA-Z0-9]{10})_(.+)$"
+        match = re.match(pattern, query.data)
+
+        if not match:
+            await safe_edit_or_resend(query, context, "Ошибка: Неверный формат данных для запроса карты.")
+            return
+
+        story_id, fragment_id = match.groups()
+        user_id_str = str(update.effective_user.id)
+        all_data = load_data()
+
+        try:
+            owner_id_str = get_owner_id_or_raise(user_id_str, story_id, all_data)
+        except PermissionError:
+            await safe_edit_or_resend(query, context, "Ошибка: У вас нет доступа к этой истории.")
+            return
+
+        story_data = all_data.get("users_story", {}).get(owner_id_str, {}).get(story_id)
+        if not story_data:
+            await safe_edit_or_resend(query, context, "Ошибка: История не найдена.")
+            return
+
+        all_fragments = story_data.get("fragments", {})
+        if fragment_id not in all_fragments:
+            await safe_edit_or_resend(query, context, f"Ошибка: Фрагмент <code>{fragment_id}</code> не найден.", parse_mode=ParseMode.HTML)
+            return
+
+        # Гашение кнопки
+        await query.answer()
+
+        # Уведомление о создании карты
+        loading_message = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="🛠️ Карта создаётся. Ожидайте...",
+        )
+
+        potential_full_subtree = find_descendant_fragments(all_fragments, fragment_id) or set()
+
+
+
+        fragments_preview_for_deletion, externally_referenced_in_subtree, descendants_to_list, bypass_reachable = get_fragments_for_deletion_preview(
+            all_fragments=all_fragments,
+            target_fragment_id=fragment_id,
+            potential_full_subtree=potential_full_subtree,
+            protected_fragment_id=PROTECTED_FRAGMENT_ID,
+        )
+        highlight_ids = fragments_preview_for_deletion    
+
+        image_path = generate_story_map(story_id, story_data, highlight_ids)
+        if image_path and os.path.exists(image_path):
+            try:
+                with open(image_path, 'rb') as doc_file:
+                    await context.bot.edit_message_media(
+                        chat_id=loading_message.chat_id,
+                        message_id=loading_message.message_id,
+                        media=InputMediaDocument(
+                            media=doc_file,
+                            caption=f"🗺️ Карта удаляемой ветки из <code>{fragment_id}</code>",
+                            parse_mode=ParseMode.HTML
+                        ),
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("❌ Закрыть", callback_data="delete_this_message")]
+                        ])
+                    )
+            finally:
+                os.remove(image_path)
+        else:
+            await context.bot.edit_message_text(
+                chat_id=loading_message.chat_id,
+                message_id=loading_message.message_id,
+                text="Ошибка: Не удалось сгенерировать карту."
+            )
+
+
+    
 
     elif data.startswith('show_map_'):
         story_id = data[len('show_map_'):]
@@ -2955,13 +3102,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # --- Логика генерации схемы и отправки сообщения (оставляем как есть) ---
             # Схема генерируется для всей истории, не для страницы
             # --- Решаем: генерировать карту или нет ---
-            reply_markup = build_fragment_keyboard(user_id_str, story_id, fragment_ids, current_page, story_data)
+
             context.user_data['current_fragment_page'] = current_page  
             raw_fragment_keys = list(story_data.get("fragments", {}).keys())
             sorted_full_fragment_ids = sorted(raw_fragment_keys, key=get_fragment_sort_key)
 
             fragment_ids_for_legend = sorted_full_fragment_ids[(current_page-1)*FRAGMENT_BUTTONS_PER_PAGE: current_page*FRAGMENT_BUTTONS_PER_PAGE]
             legend_text = build_legend_text(story_data, fragment_ids_for_legend)
+            legend_too_long = len(legend_text) > 800
+            reply_markup = build_fragment_keyboard(user_id_str, story_id, fragment_ids, current_page, story_data, legend_too_long)            
             logger.info(f"legend_text {legend_text}.")             
             if total_fragments <= 15 and len(legend_text) <= 700:
                 edited = True
@@ -5456,9 +5605,11 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
             # --- Логика генерации схемы и отправки сообщения (оставляем как есть) ---
             # Схема генерируется для всей истории, не для страницы
             # --- Решаем: генерировать карту или нет ---
-            reply_markup = build_fragment_keyboard(user_id_str, story_id, fragment_ids, current_page)
+
             context.user_data['current_fragment_page'] = current_page            
             legend_text = build_legend_text(story_data, fragment_ids[(current_page-1)*FRAGMENT_BUTTONS_PER_PAGE: current_page*FRAGMENT_BUTTONS_PER_PAGE])
+            legend_too_long = len(legend_text) > 800
+            reply_markup = build_fragment_keyboard(user_id_str, story_id, fragment_ids, current_page, story_data, legend_too_long)            
             logger.info(f"legend_text {legend_text}.")             
             if total_fragments <= 15 and len(legend_text) <= 700:
                 await query.edit_message_text("Создаю схему истории, подождите...")
@@ -6839,14 +6990,16 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data.pop(f"auto_path_{user_id}_{story_id_from_data}_{chat_id}", None)
 
-    all_data = load_data() # Убедитесь, что это эффективно
-    
+    all_data = load_data()  # Убедитесь, что это эффективно
+
     story_data_found: Optional[Dict[str, Any]] = None
-    # Поиск story_data может быть более прямым, если user_id из query.data использовался бы для доступа к all_data["users_story"][user_id_str]
-    # Но текущая логика ищет по всем пользователям, что менее эффективно, но работает если user_id_str в callback не совпадает с query.from_user.id
-    for _uid, user_stories_map in all_data.get("users_story", {}).items():
+    story_owner_id: Optional[str] = None
+
+    # Поиск story_data и владельца истории
+    for uid, user_stories_map in all_data.get("users_story", {}).items():
         if story_id_from_data in user_stories_map:
             story_data_found = user_stories_map[story_id_from_data]
+            story_owner_id = uid
             break
     
     if not story_data_found:
@@ -6865,7 +7018,7 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "choices": []
             }
 
-            save_story_data(str(user_id), story_id_from_data, story_data_found)  # не забудь сохранить изменения
+            save_story_data(str(story_owner_id), story_id_from_data, story_data_found)  # не забудь сохранить изменения
             fragment_data = fragments[fragment_id]
         else:
             await context.bot.send_message(chat_id=message.chat.id, text="Фрагмент не найден (из show_story_fragment).")
@@ -6877,7 +7030,8 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await render_fragment(
         context=context,
-        user_id=user_id,
+        user_id=user_id,        
+        owner_id=story_owner_id,
         story_id=story_id_from_data,
         fragment_id=fragment_id,
         message_to_update=message,
@@ -6887,8 +7041,6 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
         base_text_for_display=base_text_for_display, # Новый параметр
         edit_steps_for_text=edit_steps              # Новый параметр
     )
-
-
 
 
 def normalize_fragments(fragments: Dict[str, Any]) -> Dict[str, Any]:
@@ -6922,6 +7074,7 @@ active_edit_tasks: Dict[str, asyncio.Task] = {}
 async def render_fragment(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
+    owner_id: int,
     story_id: str,
     fragment_id: str,
     message_to_update: Optional[Message],
@@ -6944,17 +7097,39 @@ async def render_fragment(
 
     if not fragment or (not fragment.get("text") and not fragment.get("media")):
         if neuro_mode:
-            logger.info(f"Фрагмент {fragment_id} отсутствует или пуст, инициируем генерацию через ИИ для пользователя {user_id}.")
-            generation_status_message = await context.bot.send_message(chat_id, "Фрагмент генерируется, ожидайте…")
+            logger.info(f"Фрагмент {fragment_id} отсутствует или пуст, инициируем генерацию через ИИ для пользователя {owner_id}.")
+            generation_status_message = await context.bot.send_message(chat_id, "Фрагмент не создан автором и будет сгенерирован, ожидайте…")
 
             async def background_generation_fragment():
                 new_story_data_local = None # Для рекурсивного вызова render_fragment
                 generated_fragment_text_local = "" # Для рекурсивного вызова
                 try:
                     # Убедитесь, что generate_gemini_fragment, normalize_fragments, save_story_data, load_data определены
-                    raw_response = await generate_gemini_fragment(user_id, story_id, fragment_id)
+                    raw_response = await generate_gemini_fragment(owner_id, story_id, fragment_id)
+                    logger.debug(f"Сырой ответ от generate_gemini_fragment: {raw_response}")
+                    if not raw_response:
+                        logger.error(f"generate_gemini_fragment вернул пустой ответ для пользователя {owner_id}, история {story_id}, фрагмент {fragment_id}.")
+                        await context.bot.send_message(chat_id, "Ошибка: ИИ вернул пустой ответ. Попробуйте позже.")
+                        try:
+                            await generation_status_message.delete()
+                        except Exception:
+                            pass
+                        return
+
+
+
                     start = raw_response.find('{')
                     end = raw_response.rfind('}') + 1
+
+                    if start == -1 or end <= start:
+                        logger.error(f"Невозможно найти JSON в ответе: {raw_response}")
+                        await context.bot.send_message(chat_id, "Ошибка: ИИ вернул некорректный ответ.")
+                        try:
+                            await generation_status_message.delete()
+                        except Exception:
+                            pass
+                        return
+
                     cleaned_json_str = raw_response[start:end]
                     generated_fragment = json.loads(cleaned_json_str)
                     logger.info(f"Сгенерированный фрагмент: {generated_fragment}")
@@ -6973,13 +7148,13 @@ async def render_fragment(
                             story_data.setdefault("fragments", {})[fragment_id] = generated_fragment
                     
                     # Сохраняем данные и пытаемся их перезагрузить для актуальности
-                    save_story_data(str(user_id), story_id, story_data)
+                    save_story_data(str(owner_id), story_id, story_data)
                     new_data = load_data() # load_data должна вернуть актуальные данные
-                    user_stories = new_data.get("users_story", {}).get(str(user_id), {})
+                    user_stories = new_data.get("users_story", {}).get(str(owner_id), {})
                     new_story_data_local = user_stories.get(story_id)
 
                     if not new_story_data_local:
-                        logger.error(f"Ошибка: не удалось загрузить сгенерированный фрагмент для пользователя {user_id}, история {story_id}.")
+                        logger.error(f"Ошибка: не удалось загрузить сгенерированный фрагмент для пользователя {owner_id}, история {story_id}.")
                         await context.bot.send_message(chat_id, "Ошибка: не удалось загрузить сгенерированный фрагмент.")
                         try:
                             await generation_status_message.delete()
@@ -6998,7 +7173,7 @@ async def render_fragment(
                     
                     # Рекурсивный вызов для отображения сгенерированного фрагмента
                     await render_fragment(
-                        context=context, user_id=user_id, story_id=story_id, fragment_id=fragment_id,
+                        context=context, user_id=user_id, owner_id=owner_id, story_id=story_id, fragment_id=fragment_id,
                         message_to_update=None, # Отправляем как новое сообщение
                         story_data=new_story_data_local, chat_id=chat_id, current_auto_path=current_auto_path,
                         base_text_for_display=base_text_for_display, # Текст конкретного фрагмента
@@ -7324,6 +7499,7 @@ async def render_fragment(
             auto_transition_task(
                 context=context,
                 user_id=user_id,
+                owner_id=owner_id,
                 story_id=story_id,
                 target_fragment_id=auto_transition_target_fragment_id,
                 delay_seconds=auto_transition_timer_delay,
@@ -7344,6 +7520,7 @@ async def auto_transition_task(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
     story_id: str,
+    owner_id: str,
     target_fragment_id: str,
     delay_seconds: float,
     story_data: Dict[str, Any], # Принимаем полные story_data
@@ -7423,6 +7600,7 @@ async def auto_transition_task(
         await render_fragment(
             context=context,
             user_id=user_id,
+            owner_id=owner_id,
             story_id=story_id,
             fragment_id=target_fragment_id,
             message_to_update=message_for_next_render, # Передаем временное сообщение (или None)
@@ -8127,6 +8305,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^page_info_\d+_[\w-]+$'))         
     application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^e_f_[\w]+_[\w\.-]+$'))      
     application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^show_map_[\w-]+$')) 
+    application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^mapreq_[\w-]+$'))      
     application.add_handler(CallbackQueryHandler(delete_message_callback, pattern="^delete_this_message$"))
     application.add_handler(CallbackQueryHandler(confirm_delete_story, pattern=r"^delete_story_\d+_.+"))
     application.add_handler(CallbackQueryHandler(delete_story_confirmed, pattern=r"^confirm_delete$"))    
