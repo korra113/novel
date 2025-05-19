@@ -208,6 +208,64 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         return ADMIN_UPLOAD
 
 
+def load_story_settings() -> dict:
+    """
+    Загружает настройки историй из Firebase Realtime Database по пути 'story_settings'.
+    Возвращает словарь с настройками или пустой словарь при ошибке.
+    """
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано. Невозможно загрузить story_settings.")
+            return {}
+
+        ref = db.reference('story_settings')
+        data = ref.get()
+
+        if data is None:
+            logger.info("story_settings отсутствует в базе данных. Возвращён пустой словарь.")
+            return {}
+
+        if not isinstance(data, dict):
+            logger.warning(f"story_settings имеет некорректный формат (ожидался dict, получен {type(data)}).")
+            return {}
+
+        return data
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при загрузке story_settings: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при загрузке story_settings: {e}")
+        return {}
+
+def load_user_story(user_id_str: str, story_id: str) -> dict:
+    """
+    Загружает конкретную историю пользователя из Firebase Realtime Database
+    по пути 'users_story/{user_id_str}/{story_id}'.
+    Возвращает содержимое истории или пустой словарь при ошибке.
+    """
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано. Невозможно загрузить историю пользователя.")
+            return {}
+
+        ref = db.reference(f'users_story/{user_id_str}/{story_id}')
+        data = ref.get()
+
+        if data is None:
+            logger.info(f"История {story_id} пользователя {user_id_str} отсутствует. Возвращён пустой словарь.")
+            return {}
+
+        if not isinstance(data, dict):
+            logger.warning(f"История {story_id} пользователя {user_id_str} имеет некорректный формат (ожидался dict, получен {type(data)}).")
+            return {}
+
+        return data
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при загрузке истории {story_id} пользователя {user_id_str}: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при загрузке истории пользователя: {e}")
+        return {}
 
 
 def load_data() -> dict:
@@ -371,19 +429,38 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
 
 
 def save_data(all_data: dict):
-    """Сохраняет все предоставленные данные в корень Firebase Realtime Database."""
+    """
+    Сохраняет данные только в ключ 'story_settings' Firebase Realtime Database.
+    Предварительно загружает актуальные данные, чтобы избежать перезаписи
+    изменений, внесённых параллельно другим пользователем.
+    """
     try:
         if not firebase_admin._DEFAULT_APP_NAME:
-            logger.error("Firebase приложение не инициализировано. Невозможно сохранить все данные.")
+            logger.error("Firebase приложение не инициализировано. Невозможно сохранить данные.")
             return
 
-        ref = db.reference('/')
-        ref.set(all_data)
-        logger.info("Все данные успешно сохранены в Firebase.")
+        if 'story_settings' not in new_data:
+            logger.warning("Нет ключа 'story_settings' в переданных данных. Сохранение отменено.")
+            return
+
+        ref = db.reference('story_settings')
+
+        # Загрузка актуальных данных
+        current_data = ref.get()
+        if current_data is None:
+            current_data = {}
+
+        # Обновление актуальных данных
+        current_data.update(new_data['story_settings'])
+
+        # Сохраняем обновлённые данные
+        ref.set(current_data)
+
+        logger.info("Актуализированные данные в 'story_settings' успешно сохранены в Firebase.")
     except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при сохранении всех данных: {e}")
+        logger.error(f"Ошибка Firebase при сохранении данных в 'story_settings': {e}")
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при сохранении всех данных в Firebase: {e}")
+        logger.error(f"Неожиданная ошибка при сохранении данных в 'story_settings' Firebase: {e}")
 
 
 def save_story_data_to_file(all_data: dict) -> bool:
@@ -8173,10 +8250,6 @@ async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нет сообщений для удаления.")
 
 
-
-
-view_stories_list
-
 def main() -> None:
     """Запуск бота."""
 
@@ -8358,7 +8431,7 @@ def main() -> None:
     #application.add_handler(CallbackQueryHandler(download_story_handler, pattern=f"^{DOWNLOAD_STORY_PREFIX}"))
     application.add_handler(CallbackQueryHandler(view_public_stories_list, pattern='^public_stories$'))
     application.add_handler(CallbackQueryHandler(confirm_delete_all_neural, pattern="^confirm_delete_all_neural$"))
-    application.add_handler(CallbackQueryHandler(delete_all_neural_stories, pattern="^delete_all_neural_confirmed$"))                
+    application.add_handler(CallbackQueryHandler(delete_all_neural_stories_firebase, pattern="^delete_all_neural_confirmed$"))                
     # Добавить сюда обработчик для кнопок вида 'play_{user_id}_start' для запуска просмотра
     # application.add_handler(CallbackQueryHandler(play_story_handler, pattern='^play_'))
     application.add_handler(CallbackQueryHandler(show_story_fragment, pattern=r"^play_\d+_[a-f0-9]+_[\w\d._]+$"))
