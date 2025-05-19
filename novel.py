@@ -168,9 +168,27 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
+        # --- Найти повторяющиеся story_id в users_story ---
+        story_to_users = defaultdict(list)
+
+        users_story = data.get("users_story", {})
+        for user_id, stories in users_story.items():
+            for story_id in stories:
+                story_to_users[story_id].append(user_id)
+
+        repeated_stories = {sid: uids for sid, uids in story_to_users.items() if len(uids) > 1}
+
+        html_result = ""
+        if repeated_stories:
+            html_result = "<b>Повторяющиеся story_id в users_story:</b>\n\n"
+            for sid, user_ids in repeated_stories.items():
+                html_result += f"<code>{sid}</code> — используется у пользователей: {', '.join(user_ids)}\n"
+        else:
+            html_result = "Повторяющихся story_id не найдено."
+
+        # --- Преобразовать choices (ваша логика) ---
         converted_data = convert_choices_in_story(data)
 
-        # Сохраняем в новый файл
         converted_path = tmp_dir / f"converted_{file.file_id}.json"
         with open(converted_path, 'w', encoding='utf-8') as f:
             json.dump(converted_data, f, ensure_ascii=False, indent=2)
@@ -181,12 +199,13 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
                 caption="Вот JSON с обновлёнными choices."
             )
 
+        await update.message.reply_html(html_result)
+
         return ConversationHandler.END
 
     except Exception as e:
         await update.message.reply_text(f"Ошибка при обработке: {e}")
         return ADMIN_UPLOAD
-
 
 
 
@@ -233,6 +252,8 @@ def save_story_data(user_id_str: str, story_id: str, story_content: dict):
     """
     Сохраняет данные конкретной истории для конкретного пользователя
     в Firebase Realtime Database по пути 'users_story/{user_id_str}/{story_id}'.
+    Предварительно загружает актуальные данные, чтобы избежать перезаписи
+    изменений, внесённых параллельно другим пользователем.
     """
     try:
         if not firebase_admin._DEFAULT_APP_NAME:
@@ -240,8 +261,19 @@ def save_story_data(user_id_str: str, story_id: str, story_content: dict):
             return
 
         ref = db.reference(f'users_story/{user_id_str}/{story_id}')
-        ref.set(story_content)
-        logger.info(f"Данные для истории {story_id} пользователя {user_id_str} сохранены в Firebase.")
+        
+        # Загрузка актуальных данных перед сохранением
+        current_data = ref.get()
+        if current_data is None:
+            current_data = {}
+
+        # Обновление данных — можно заменить на более интеллектуальное слияние
+        current_data.update(story_content)
+
+        # Сохраняем объединённые данные
+        ref.set(current_data)
+
+        logger.info(f"Актуализированные данные для истории {story_id} пользователя {user_id_str} сохранены в Firebase.")
     except firebase_admin.exceptions.FirebaseError as e:
         logger.error(f"Ошибка Firebase при сохранении данных истории {story_id} для пользователя {user_id_str}: {e}")
     except Exception as e:
@@ -264,20 +296,6 @@ def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Попытка сохранить текущую историю из контекста, но не все данные найдены в context.user_data (user_id_str, story_id, current_story).")
 
 
-def save_data(all_data: dict):
-    """Сохраняет все предоставленные данные в корень Firebase Realtime Database."""
-    try:
-        if not firebase_admin._DEFAULT_APP_NAME:
-            logger.error("Firebase приложение не инициализировано. Невозможно сохранить все данные.")
-            return
-
-        ref = db.reference('/')
-        ref.set(all_data)
-        logger.info("Все данные успешно сохранены в Firebase.")
-    except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при сохранении всех данных: {e}")
-    except Exception as e:
-        logger.error(f"Неожиданная ошибка при сохранении всех данных в Firebase: {e}")
 
 
 
@@ -349,6 +367,24 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Неожиданная ошибка при удалении истории {story_id_to_delete} (владелец {user_id_owner}): {e}")
         if query:
             await query.answer("Неожиданная ошибка при удалении истории.", show_alert=True)
+
+
+
+
+def save_data(all_data: dict):
+    """Сохраняет все предоставленные данные в корень Firebase Realtime Database."""
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано. Невозможно сохранить все данные.")
+            return
+
+        ref = db.reference('/')
+        ref.set(all_data)
+        logger.info("Все данные успешно сохранены в Firebase.")
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при сохранении всех данных: {e}")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при сохранении всех данных в Firebase: {e}")
 
 
 def save_story_data_to_file(all_data: dict) -> bool:
