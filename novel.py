@@ -1448,9 +1448,7 @@ async def handle_delete_fragment_execute(update: Update, context: ContextTypes.D
         if 'current_story' in context.user_data and context.user_data.get('story_id') == story_id:
             context.user_data['current_story'] = story_data
 
-        if not save_story_data_to_file(all_data):
-            await query.edit_message_text("Ошибка при сохранении изменений после удаления.")
-            return EDIT_STORY_MAP
+        save_story_data(owner_id_str, story_id, story_data)
 
         # --- Генерация и отправка обновленной карты ---
         total_fragments_after_delete = len(all_fragments)
