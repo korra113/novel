@@ -48,6 +48,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+import uuid
 from uuid import uuid4
 
 import firebase_admin
