@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Укажите команду для запуска вашего бота (замените your_bot_script.py на имя вашего главного файла)
-CMD ["python", "otlnovel.py"]
+CMD ["python", "novel.py"]
