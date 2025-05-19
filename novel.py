@@ -85,7 +85,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING) # Уменьшает спа
 logger = logging.getLogger(__name__)
 
 # --- Константы ---
-BOT_TOKEN = "7923930676:AAEkCg6-E35fyRnAzvxqoZvgEo8o8KTT8EU"  # <-- ЗАМЕНИ НА СВОЙ ТОКЕН БОТА
+BOT_TOKEN = "7553491252:AAFwKa2WzZ6wKMVUIGt18oxCGPNqvSo5oRA"  # <-- ЗАМЕНИ НА СВОЙ ТОКЕН БОТА
 
 
 cred = credentials.Certificate('/etc/secrets/firebase-key.json')  # Путь к вашему JSON файлу
