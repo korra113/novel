@@ -342,13 +342,11 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
         logger.warning("Ключ 'delete_candidate' не найден или не содержит полных данных в context.user_data при попытке удаления.")
         if query:
             await query.answer("Ошибка: данные для удаления истории не найдены в сессии.", show_alert=True)
-        # return await view_stories_list(update, context) # Зависит от наличия view_stories_list
         return
 
     story_ref = db.reference(f'users_story/{user_id_owner}/{story_id_to_delete}')
 
     try:
-        # Проверка существования истории перед удалением (опционально, Firebase delete не выдаст ошибку, если путь не существует)
         if story_ref.get() is None:
             logger.info(f"Попытка удалить несуществующую историю: users_story/{user_id_owner}/{story_id_to_delete}")
             if query:
@@ -358,6 +356,8 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
             logger.info(f"История {story_id_to_delete} пользователя {user_id_owner} удалена из Firebase.")
             if query:
                 await query.answer("История удалена.", show_alert=True)
+            # Показываем обновлённый список историй
+            await view_stories_list(update, context)
 
     except firebase_admin.exceptions.FirebaseError as e:
         logger.error(f"Ошибка Firebase при удалении истории {story_id_to_delete} для пользователя {user_id_owner}: {e}")
@@ -367,7 +367,6 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Неожиданная ошибка при удалении истории {story_id_to_delete} (владелец {user_id_owner}): {e}")
         if query:
             await query.answer("Неожиданная ошибка при удалении истории.", show_alert=True)
-
 
 
 
@@ -6918,26 +6917,38 @@ async def confirm_delete_all_neural(update: Update, context: ContextTypes.DEFAUL
         parse_mode="Markdown"
     )
 
-async def delete_all_neural_stories(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id_str = str(update.effective_user.id)
-    all_data = load_data()
+async def delete_all_neural_stories_firebase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not firebase_admin._DEFAULT_APP_NAME:
+        logger.error("Firebase приложение не инициализировано.")
+        if update.callback_query:
+            await update.callback_query.answer("Ошибка: база данных недоступна.", show_alert=True)
+        return
 
-    # Фильтруем только НЕ нейроистории
-    user_stories = all_data.get("users_story", {}).get(user_id_str, {})
-    new_user_stories = {sid: story for sid, story in user_stories.items() if not story.get("neural")}
-    all_data["users_story"][user_id_str] = new_user_stories
+    user_id = str(update.effective_user.id)
+    user_stories_ref = db.reference(f'users_story/{user_id}')
+    all_stories = user_stories_ref.get()
 
-    # Сохраняем изменения
-    save_data(all_data)
+    if not all_stories:
+        await update.callback_query.answer("У вас нет историй для удаления.", show_alert=True)
+        return
 
-    # Кнопка "Назад"
+    deleted_any = False
+    for story_id, story_data in list(all_stories.items()):
+        if story_data.get("neural"):
+            user_stories_ref.child(story_id).delete()
+            deleted_any = True
+            logger.info(f"Удалена нейроистория {story_id} пользователя {user_id}")
+
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='view_stories')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.callback_query.edit_message_text(
-        "Все нейроистории были успешно удалены. 🧠❌",
-        reply_markup=reply_markup
-    )
+    if deleted_any:
+        await update.callback_query.edit_message_text(
+            "Все нейроистории были успешно удалены из базы данных. 🧠❌",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.callback_query.answer("Нейроистории не найдены.", show_alert=True)
 
 
 async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYPE):
