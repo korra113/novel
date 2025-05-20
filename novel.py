@@ -168,10 +168,15 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
+        # --- Добавить owner_id ко всем историям ---
+        users_story = data.get("users_story", {})
+        for user_id, stories in users_story.items():
+            for story_id, story_data in stories.items():
+                if isinstance(story_data, dict):
+                    story_data["owner_id"] = user_id
+
         # --- Найти повторяющиеся story_id в users_story ---
         story_to_users = defaultdict(list)
-
-        users_story = data.get("users_story", {})
         for user_id, stories in users_story.items():
             for story_id in stories:
                 story_to_users[story_id].append(user_id)
@@ -196,7 +201,7 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         with open(converted_path, 'rb') as f:
             await update.message.reply_document(
                 document=InputFile(f, filename=f"converted_{document.file_name}"),
-                caption="Вот JSON с обновлёнными choices."
+                caption="Вот JSON с обновлёнными choices и owner_id."
             )
 
         await update.message.reply_html(html_result)
@@ -208,63 +213,143 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         return ADMIN_UPLOAD
 
 
-def load_story_settings() -> dict:
+def load_story_settings(inline_message_id: str) -> dict:
     """
-    Загружает настройки историй из Firebase Realtime Database по пути 'story_settings'.
-    Возвращает словарь с настройками или пустой словарь при ошибке.
+    Загружает конкретные настройки истории по ключу inline_message_id из 'story_settings'.
     """
     try:
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно загрузить story_settings.")
             return {}
 
-        ref = db.reference('story_settings')
+        ref = db.reference(f'story_settings/{inline_message_id}')
         data = ref.get()
 
         if data is None:
-            logger.info("story_settings отсутствует в базе данных. Возвращён пустой словарь.")
+            logger.info(f"Настройки story_settings для {inline_message_id} отсутствуют. Возвращён пустой словарь.")
             return {}
 
         if not isinstance(data, dict):
-            logger.warning(f"story_settings имеет некорректный формат (ожидался dict, получен {type(data)}).")
+            logger.warning(f"Настройки story_settings/{inline_message_id} имеют некорректный формат.")
             return {}
 
         return data
     except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при загрузке story_settings: {e}")
+        logger.error(f"Ошибка Firebase при загрузке story_settings/{inline_message_id}: {e}")
         return {}
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при загрузке story_settings: {e}")
+        logger.error(f"Неожиданная ошибка при загрузке story_settings/{inline_message_id}: {e}")
         return {}
 
-def load_user_story(user_id_str: str, story_id: str) -> dict:
+def load_all_user_stories(user_id_str: str) -> dict:
     """
-    Загружает конкретную историю пользователя из Firebase Realtime Database
-    по пути 'users_story/{user_id_str}/{story_id}'.
-    Возвращает содержимое истории или пустой словарь при ошибке.
+    Загружает все истории пользователя по user_id_str.
+    Не ищет среди других пользователей и не проверяет coop_edit.
     """
     try:
         if not firebase_admin._DEFAULT_APP_NAME:
-            logger.error("Firebase приложение не инициализировано. Невозможно загрузить историю пользователя.")
+            logger.error("Firebase приложение не инициализировано.")
             return {}
 
+        ref = db.reference(f'users_story/{user_id_str}')
+        data = ref.get()
+
+        if data is not None and isinstance(data, dict):
+            return data
+        else:
+            logger.info(f"У пользователя {user_id_str} не найдено историй.")
+            return {}
+
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при загрузке историй пользователя {user_id_str}: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при загрузке историй пользователя {user_id_str}: {e}")
+        return {}
+
+
+
+def load_all_coop_stories_with_user(user_id_str: str) -> dict:
+    """
+    Загружает все истории всех пользователей, в которых user_id_str есть в списке coop_edit.
+    """
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано.")
+            return {}
+
+        ref = db.reference('users_story')
+        all_users_data = ref.get()
+
+        if not all_users_data:
+            return {}
+
+        result = {}
+        for other_user_id, stories in all_users_data.items():
+            if not isinstance(stories, dict):
+                continue
+            for story_id, story_data in stories.items():
+                coop_list = story_data.get("coop_edit", [])
+                if user_id_str in coop_list:
+                    result[story_id] = story_data
+
+        return result
+
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при загрузке coop-историй пользователя {user_id_str}: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при загрузке coop-историй: {e}")
+        return {}
+
+
+def load_user_story(user_id_str: str, story_id: str) -> dict:
+    """
+    Загружает историю пользователя по user_id_str и story_id.
+    Если не находит напрямую, ищет среди всех историй других пользователей с coop_edit доступом.
+    """
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано.")
+            return {}
+
+        # Попытка загрузить напрямую
         ref = db.reference(f'users_story/{user_id_str}/{story_id}')
         data = ref.get()
 
-        if data is None:
-            logger.info(f"История {story_id} пользователя {user_id_str} отсутствует. Возвращён пустой словарь.")
+        if data is not None and isinstance(data, dict):
+            return data
+
+        # Если не нашли — ищем среди всех
+        logger.info(f"История {story_id} не найдена у пользователя {user_id_str}. Пытаемся найти владельца...")
+
+        all_users_ref = db.reference('users_story')
+        all_stories = all_users_ref.get()
+
+        if not all_stories or not isinstance(all_stories, dict):
+            logger.warning("Не удалось загрузить список всех историй пользователей.")
             return {}
 
-        if not isinstance(data, dict):
-            logger.warning(f"История {story_id} пользователя {user_id_str} имеет некорректный формат (ожидался dict, получен {type(data)}).")
-            return {}
+        for possible_owner_id, stories in all_stories.items():
+            if not isinstance(stories, dict):
+                continue
+            story_data = stories.get(story_id)
+            if story_data:
+                try:
+                    actual_owner = get_owner_id_or_raise(int(user_id_str), story_id, story_data)
+                    logger.info(f"История {story_id} найдена у пользователя {actual_owner} с правом coop_edit для {user_id_str}.")
+                    return story_data
+                except PermissionError:
+                    continue
 
-        return data
+        logger.info(f"История {story_id} недоступна для пользователя {user_id_str} ни напрямую, ни по coop_edit.")
+        return {}
+
     except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при загрузке истории {story_id} пользователя {user_id_str}: {e}")
+        logger.error(f"Ошибка Firebase при загрузке истории {story_id}: {e}")
         return {}
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при загрузке истории пользователя: {e}")
+        logger.error(f"Неожиданная ошибка при загрузке истории {story_id}: {e}")
         return {}
 
 
@@ -357,27 +442,37 @@ def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
 
 
 
-def get_owner_id_or_raise(user_id_str: str, story_id: str, data: dict) -> str:
+def get_owner_id_or_raise(user_id: int, story_id: str, story_data: dict) -> str:
     """
-    Возвращает user_id владельца истории, если пользователь имеет права на редактирование.
-    Иначе вызывает PermissionError.
+    Проверяет, имеет ли пользователь доступ к данной истории.
+    Возвращает user_id владельца истории (строкой) или вызывает PermissionError.
+    Если story_id == "000", доступ всегда разрешён.
     """
-    users_story = data.get("users_story", {})
+    if story_id == "000":
+        return str(user_id)
 
-    for owner_id, stories in users_story.items():
-        if story_id in stories:
-            story = stories[story_id]
+    if not story_data or not isinstance(story_data, dict):
+        raise PermissionError(f"История {story_id} не найдена или повреждена.")
 
-            if user_id_str == owner_id:
-                return owner_id  # Сам владелец
+    owner_id_raw = story_data.get("owner_id")
+    if owner_id_raw is None:
+        raise PermissionError(f"История {story_id} не содержит информации о владельце.")
 
-            coop_list = story.get("coop_edit", [])
-            if user_id_str in coop_list:
-                return owner_id  # Совместный редактор
+    try:
+        owner_id = int(owner_id_raw)
+    except ValueError:
+        raise PermissionError(f"owner_id имеет неверный формат: {owner_id_raw}")
 
-            break  # История найдена, но доступа нет
+    coop_list_raw = story_data.get("coop_edit", [])
+    coop_list = [int(uid) for uid in coop_list_raw if isinstance(uid, (str, int)) and str(uid).isdigit()]
 
-    raise PermissionError(f"Пользователь {user_id_str} не имеет доступа к истории {story_id}")
+    logging.info(f"owner_id: {owner_id}")    
+    logging.info(f"user_id: {user_id}")
+
+    if user_id == owner_id or user_id in coop_list:
+        return str(owner_id)
+
+    raise PermissionError(f"Пользователь {user_id} не имеет доступа к истории {story_id}")
 
 
 
@@ -428,40 +523,47 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
-def save_data(all_data: dict):
+def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict):
     """
-    Сохраняет данные только в ключ 'story_settings' Firebase Realtime Database.
-    Предварительно загружает актуальные данные, чтобы избежать перезаписи
-    изменений, внесённых параллельно другим пользователем.
+    Сохраняет полное состояние истории/голосования в Firebase.
+    Добавляет или обновляет время запуска.
     """
-    try:
-        if not firebase_admin._DEFAULT_APP_NAME:
-            logger.error("Firebase приложение не инициализировано. Невозможно сохранить данные.")
-            return
+    if not inline_message_id:
+        logger.error("save_story_state_to_firebase: inline_message_id is required.")
+        return
 
-        if 'story_settings' not in new_data:
-            logger.warning("Нет ключа 'story_settings' в переданных данных. Сохранение отменено.")
-            return
+    ref = db.reference(f'story_settings/{inline_message_id}') # Замените db.reference реальной функцией
+    
+    # Получаем существующие данные, чтобы не перезаписать launch_time если оно уже есть
+    existing_data = ref.get() or {}
+    
+    if 'launch_time' not in existing_data and 'launch_time' not in story_state_data :
+        now_utc = datetime.datetime.utcnow()
+        story_state_data['launch_time'] = {
+            'year': now_utc.year,
+            'day': now_utc.day, # День месяца
+            'hour': now_utc.hour,
+            'minute': now_utc.minute,
+            'iso_timestamp_utc': now_utc.isoformat() # Для удобства
+        }
+        logger.info(f"Setting initial launch_time for {inline_message_id}")
+    elif 'launch_time' in existing_data and 'launch_time' not in story_state_data:
+        story_state_data['launch_time'] = existing_data['launch_time'] # Сохраняем существующее время
 
-        ref = db.reference('story_settings')
+    # Конвертируем set в list для Firebase (JSON)
+    if 'poll_details' in story_state_data and story_state_data['poll_details']:
+        if 'votes' in story_state_data['poll_details']:
+            votes_data = story_state_data['poll_details']['votes']
+            if isinstance(votes_data, dict):
+                story_state_data['poll_details']['votes'] = {
+                    str(idx): list(user_set)
+                    for idx, user_set in votes_data.items()
+                }
+        if 'voted_users' in story_state_data['poll_details'] and isinstance(story_state_data['poll_details']['voted_users'], set):
+             story_state_data['poll_details']['voted_users'] = list(story_state_data['poll_details']['voted_users'])
 
-        # Загрузка актуальных данных
-        current_data = ref.get()
-        if current_data is None:
-            current_data = {}
-
-        # Обновление актуальных данных
-        current_data.update(new_data['story_settings'])
-
-        # Сохраняем обновлённые данные
-        ref.set(current_data)
-
-        logger.info("Актуализированные данные в 'story_settings' успешно сохранены в Firebase.")
-    except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при сохранении данных в 'story_settings': {e}")
-    except Exception as e:
-        logger.error(f"Неожиданная ошибка при сохранении данных в 'story_settings' Firebase: {e}")
-
+    logger.info(f"Saving to Firebase for {inline_message_id}: {story_state_data}")
+    ref.set(story_state_data)
 
 def save_story_data_to_file(all_data: dict) -> bool:
     """
@@ -486,7 +588,34 @@ def save_story_data_to_file(all_data: dict) -> bool:
         return False
 
 
-
+def load_story_state_from_firebase(inline_message_id: str) -> dict | None:
+    """
+    Загружает состояние истории/голосования из Firebase.
+    Конвертирует данные из JSON-совместимых форматов обратно в нужные типы (например, list в set).
+    """
+    if not inline_message_id:
+        logger.error("load_story_state_from_firebase: inline_message_id is required.")
+        return None
+        
+    ref = db.reference(f'story_settings/{inline_message_id}') # Замените db.reference реальной функцией
+    story_state = ref.get()
+    if story_state:
+        logger.info(f"Loaded from Firebase for {inline_message_id}: {story_state}")
+        # Конвертируем обратно list в set для votes и voted_users
+        if 'poll_details' in story_state and story_state['poll_details']:
+            if 'votes' in story_state['poll_details']:
+                votes_raw = story_state['poll_details']['votes']
+                if isinstance(votes_raw, dict):
+                    story_state['poll_details']['votes'] = {
+                        idx_str: set(user_list)
+                        for idx_str, user_list in votes_raw.items()
+                    }
+                else:
+                    logger.warning(f"'votes' expected to be dict, got {type(votes_raw)}: {votes_raw}")
+            if 'voted_users' in story_state['poll_details']:
+                 story_state['poll_details']['voted_users'] = set(story_state['poll_details']['voted_users'])
+        return story_state
+    return None
 
 
 
@@ -496,7 +625,11 @@ def save_story_data_to_file(all_data: dict) -> bool:
 #===============================================================        
 
 
-
+import logging
+import datetime # Для времени запуска
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo, InputMediaAnimation, InputMediaAudio
+from telegram.ext import CallbackContext
 
 
 
@@ -514,8 +647,8 @@ def clean_caption(text: str) -> str:
 
 async def display_fragment_for_interaction(context: CallbackContext, inline_message_id: str, target_user_id_str: str, story_id: str, fragment_id: str):
     logger.info(f"Displaying fragment: inline_msg_id={inline_message_id}, target_user={target_user_id_str}, story={story_id}, fragment={fragment_id}")
-
-    all_data = load_data()
+    
+    all_data = load_data() # Загрузка определений историй (не состояний)
     story_definition = None
     for user_key, user_stories in all_data.get("users_story", {}).items():
         if story_id in user_stories:
@@ -523,7 +656,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             break
 
     if not story_definition:
-        logger.warning(f"История {story_id} не найдена для target_user {target_user_id_str} (или вообще).")
+        logger.warning(f"История {story_id} не найдена.")
         if inline_message_id:
             try:
                 await context.bot.edit_message_text(inline_message_id=inline_message_id, text="История не найдена.")
@@ -547,87 +680,165 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
     media = fragment.get("media", [])
     keyboard = []
     reply_markup = None
-
-    # Получаем порог голосов
-    # Сначала пытаемся из context.bot_data (если только что установлен)
-    # потом из story_settings в файле (если это перезапуск или другой вызов)
+    
     required_votes_for_poll = None
-    poll_setup_data = context.bot_data.get(inline_message_id, {})
-    
-    if poll_setup_data and poll_setup_data.get("type") == "poll_setup_pending_display": # специальный флаг
-        required_votes_for_poll = poll_setup_data.get("required_votes")
-        # Очищаем этот временный флаг, если он был
-        # context.bot_data[inline_message_id].pop("type", None) # Опасно, если там еще что-то есть
-    
-    if required_votes_for_poll is None:
-        story_settings_from_file = all_data.get("story_settings", {}).get(inline_message_id)
-        if story_settings_from_file and "required_votes" in story_settings_from_file:
-            required_votes_for_poll = story_settings_from_file["required_votes"]
+    current_poll_data_from_bot_data = None # Для хранения данных опроса, если они есть в bot_data
+
+    # 1. Проверяем, есть ли данные в context.bot_data (например, только что установленный порог)
+    if inline_message_id in context.bot_data:
+        bot_data_entry = context.bot_data[inline_message_id]
+        if bot_data_entry.get("type") == "poll_setup_pending_display": # После установки порога
+            required_votes_for_poll = bot_data_entry.get("required_votes")
+            logger.info(f"Using required_votes from poll_setup_pending_display: {required_votes_for_poll}")
+             # Удаляем временный флаг, чтобы он не мешал при следующем вызове (если не будет перезагрузки)
+            # context.bot_data[inline_message_id].pop("type") # Осторожно!
+        elif bot_data_entry.get("type") == "poll": # Уже существующий опрос в памяти
+            current_poll_data_from_bot_data = bot_data_entry
+            required_votes_for_poll = bot_data_entry.get("required_votes_to_win")
+            story_id = bot_data_entry.get("story_id", story_id) # Обновляем, если есть в bot_data
+            target_user_id_str = bot_data_entry.get("target_user_id", target_user_id_str)
+            fragment_id = bot_data_entry.get("current_fragment_id", fragment_id) # Это текущий фрагмент опроса
+            logger.info(f"Using existing poll data from context.bot_data for {inline_message_id}")
+
+
+    # 2. Если нет свежих данных в bot_data, пытаемся загрузить из Firebase
+    if required_votes_for_poll is None and not current_poll_data_from_bot_data:
+        logger.info(f"No fresh data in bot_data for {inline_message_id}, attempting Firebase load.")
+        story_state_from_firebase = load_story_state_from_firebase(inline_message_id)
+        if story_state_from_firebase:
+            logger.info(f"Loaded state from Firebase for {inline_message_id}")
+            # Обновляем переменные из загруженного состояния
+            story_id = story_state_from_firebase.get("story_id", story_id)
+            target_user_id_str = story_state_from_firebase.get("target_user_id", target_user_id_str)
+            # Важно: fragment_id для отображения может отличаться от current_fragment_id в Firebase,
+            # если это переход на новый фрагмент. Но если мы восстанавливаем опрос, то current_fragment_id из Firebase - это он и есть.
+            # Если мы просто отображаем фрагмент (не обязательно с опросом), то переданный fragment_id важнее.
+            # Сейчас логика такая, что display_fragment_for_interaction вызывается с конкретным fragment_id для отображения.
+            # Если в Firebase есть активный опрос для этого fragment_id, то он подхватится.
+            
+            required_votes_for_poll = story_state_from_firebase.get("required_votes_to_win")
+            
+            # Если в Firebase есть детали опроса, загружаем их в context.bot_data
+            if "poll_details" in story_state_from_firebase and story_state_from_firebase.get("current_fragment_id") == fragment_id:
+                poll_details_fb = story_state_from_firebase["poll_details"]
+                current_poll_data_from_bot_data = { # Это станет poll_data для текущей логики
+                    "type": "poll",
+                    "target_user_id": story_state_from_firebase["target_user_id"],
+                    "story_id": story_state_from_firebase["story_id"],
+                    "current_fragment_id": story_state_from_firebase["current_fragment_id"],
+                    "choices_data": poll_details_fb.get("choices_data", []),
+                    "votes": {int(k): v_set for k, v_set in poll_details_fb.get("votes", {}).items()}, # Ключи в int
+                    "voted_users": poll_details_fb.get("voted_users", set()),
+                    "required_votes_to_win": story_state_from_firebase["required_votes_to_win"]
+                }
+                context.bot_data[inline_message_id] = current_poll_data_from_bot_data # Сохраняем в bot_data для этой сессии
+                logger.info(f"Populated context.bot_data with poll state from Firebase for {inline_message_id}")
+            elif required_votes_for_poll is not None: # Порог есть, но деталей опроса нет (или для другого фрагмента)
+                 logger.info(f"Using required_votes from Firebase settings: {required_votes_for_poll}")
+        else:
+            logger.info(f"No state found in Firebase for {inline_message_id}.")
 
     if len(choices) > 1 and required_votes_for_poll is None:
-        logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Порог голосов не найден для {inline_message_id} при попытке отобразить фрагмент с выбором.")
+        logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Порог голосов не найден для {inline_message_id} (fragment: {fragment_id}) при попытке отобразить фрагмент с выбором.")
         if inline_message_id:
             try:
                 await context.bot.edit_message_text(inline_message_id=inline_message_id, text="Ошибка конфигурации голосования: порог не установлен.")
             except Exception as e_edit:
                 logger.error(f"Не удалось отредактировать сообщение об ошибке порога: {e_edit}")
         return
-    elif len(choices) <=1 and required_votes_for_poll is None:
-        # Для одного варианта или без вариантов порог не нужен, это нормально
-        pass
-
-
-    # Логика с previous_fragment и media
-    app_data = context.application.bot_data.setdefault("fragments", {}) # TODO: Убедиться, что это не конфликтует с context.bot_data
+    
+    # ... (логика с previous_fragment и media остается как есть)
+    app_data = context.application.bot_data.setdefault("fragments", {})
     previous_fragment = app_data.get(inline_message_id, {}).get("last_fragment")
-
-    if media and isinstance(media, list):
-        media = media[:1]
+    if media and isinstance(media, list): media = media[:1]
     if not media and previous_fragment:
         old_media = previous_fragment.get("media", [])
         if len(old_media) == 1 and old_media[0].get("type") == "photo":
             media = [{"type": "photo", "file_id": DEFAULT_FILE_ID}]
-
     fragment["media"] = media
     app_data.setdefault(inline_message_id, {})
     app_data[inline_message_id]["last_fragment"] = {"id": fragment_id, "media": media}
 
 
     if len(choices) > 0: # Это блок для голосования
-        if required_votes_for_poll is None: # Дополнительная проверка, хотя выше уже должна была быть
-            logger.error(f"Попытка создать опрос для {inline_message_id} без установленного порога голосов.")
-            # (обработка ошибки уже была выше)
+        if required_votes_for_poll is None: # Доп. проверка
+            logger.error(f"Попытка создать опрос для {inline_message_id} (fragment: {fragment_id}) без порога.")
             return
 
-        poll_data = {
-            "type": "poll", # Важно для идентификации в handle_poll_vote
-            "target_user_id": target_user_id_str,
-            "story_id": story_id,
-            "current_fragment_id": fragment_id,
-            "choices_data": [],
-            "votes": {idx: set() for idx in range(len(choices))},
-            "voted_users": set(),
-            "required_votes_to_win": required_votes_for_poll
-        }
+        poll_data_to_use = None
+        if current_poll_data_from_bot_data and current_poll_data_from_bot_data.get("current_fragment_id") == fragment_id:
+            # Используем загруженные или уже существующие в памяти данные опроса
+            poll_data_to_use = current_poll_data_from_bot_data
+            logger.info(f"Reusing/using loaded poll data for {fragment_id}")
+        else:
+            # Создаем новый poll_data, т.к. перешли на новый фрагмент или не было загружено
+            logger.info(f"Creating new poll_data for fragment {fragment_id}")
+            poll_data_to_use = {
+                "type": "poll",
+                "target_user_id": target_user_id_str,
+                "story_id": story_id,
+                "current_fragment_id": fragment_id,
+                "choices_data": [],
+                "votes": {idx: set() for idx in range(len(choices))},
+                "voted_users": set(),
+                "required_votes_to_win": required_votes_for_poll
+            }
+            for idx, choice in enumerate(choices):
+                text = choice["text"]
+                next_fid = choice["target"]
+                poll_data_to_use["choices_data"].append({"text": text, "next_fragment_id": next_fid})
+            
+            # Сохраняем свежесозданный poll_data в context.bot_data
+            context.bot_data[inline_message_id] = poll_data_to_use
 
-        for idx, choice in enumerate(choices):
-            text = choice["text"]
-            next_fid = choice["target"]
-            poll_data["choices_data"].append({"text": text, "next_fragment_id": next_fid})
-            keyboard.append([InlineKeyboardButton(f"(0/{required_votes_for_poll}) {text}", callback_data=f"vote_{inline_message_id}_{idx}")])
-
-        # Сохраняем данные опроса в context.bot_data (перезаписывая, если там было что-то от poll_setup_pending_display)
-        context.bot_data[inline_message_id] = poll_data
+        # Обновляем клавиатуру на основе poll_data_to_use
+        keyboard = []
+        for idx, choice_d in enumerate(poll_data_to_use["choices_data"]):
+            num_votes = len(poll_data_to_use["votes"].get(idx, set())) # Убедимся, что idx есть
+            text = choice_d["text"]
+            keyboard.append([InlineKeyboardButton(f"({num_votes}/{required_votes_for_poll}) {text}", callback_data=f"vote_{inline_message_id}_{idx}")])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         caption += f"\n\n🗳️ Голосуйте! Нужно {required_votes_for_poll} голосов для выбора."
+        
+        # Сохраняем состояние в Firebase ПОСЛЕ того как poll_data_to_use сформирован
+        # Это включает начальные настройки или восстановленное состояние
+        # Launch_time уже должен быть установлен, если это не первый вызов.
+        # save_story_state_to_firebase позаботится о launch_time.
+        
+        # Формируем данные для сохранения, включая poll_details
+        firebase_save_data = {
+            "story_id": poll_data_to_use["story_id"],
+            "target_user_id": poll_data_to_use["target_user_id"],
+            "current_fragment_id": poll_data_to_use["current_fragment_id"],
+            "required_votes_to_win": poll_data_to_use["required_votes_to_win"],
+            "poll_details": { # Явно указываем poll_details
+                "choices_data": poll_data_to_use["choices_data"],
+                # Конвертация для Firebase произойдет внутри save_story_state_to_firebase
+                "votes": poll_data_to_use["votes"], 
+                "voted_users": poll_data_to_use["voted_users"]
+            }
+            # launch_time добавится/сохранится в save_story_state_to_firebase
+        }
+        save_story_state_to_firebase(inline_message_id, firebase_save_data)
+        logger.info(f"Saved/Updated story state for poll display: {inline_message_id}, fragment: {fragment_id}")
 
     else: # Нет вариантов выбора
         caption += "\n\n(Продолжение следует автоматически или история завершена)"
-        # Здесь можно добавить логику автоматического перехода или завершения, если нет выборов.
-        # Пока что просто отобразит текст. Если есть "next_fragment_id" на уровне фрагмента без choices,
-        # то можно было бы его обработать.
+        # Если это конец истории или автоматический переход, можно очистить состояние из Firebase
+        # Но пока неясно, как это определить здесь. Очистка лучше в end_poll_and_proceed или при явном завершении.
+        # Если здесь был активный опрос, но на новом фрагменте его нет, то poll_details в Firebase нужно очистить.
+        existing_state = load_story_state_from_firebase(inline_message_id)
+        if existing_state:
+            if "poll_details" in existing_state: # Если был опрос, а теперь нет
+                logger.info(f"Fragment {fragment_id} has no choices. Clearing poll_details from Firebase for {inline_message_id}")
+                existing_state.pop("poll_details", None) # Удаляем детали опроса
+                # current_fragment_id обновляется на текущий, без опроса
+                existing_state["current_fragment_id"] = fragment_id 
+                save_story_state_to_firebase(inline_message_id, existing_state)
 
-    # Отправка/редактирование сообщения
+
+    # Отправка/редактирование сообщения (без изменений)
     try:
         if media and isinstance(media, list) and media[0].get("file_id"):
             media_item = media[0]
@@ -646,9 +857,11 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
         await context.bot.edit_message_text(inline_message_id=inline_message_id, text=caption, reply_markup=reply_markup, parse_mode='HTML')
     except Exception as e:
         logger.error(f"Error updating message {inline_message_id}: {e}")
-        if inline_message_id in context.bot_data:
-            del context.bot_data[inline_message_id] # Очищаем состояние, если отправка не удалась
-            logger.info(f"Cleaned up bot_data for {inline_message_id} due to message edit error.")
+        # Не очищаем context.bot_data здесь, т.к. данные могут быть важны для Firebase
+        # if inline_message_id in context.bot_data:
+        #     del context.bot_data[inline_message_id] 
+        #     logger.info(f"Cleaned up bot_data for {inline_message_id} due to message edit error.")
+
 
 
 async def handle_inline_play(update: Update, context: CallbackContext):
@@ -715,29 +928,35 @@ async def handle_set_vote_threshold(update: Update, context: CallbackContext):
         return
 
     try:
-        logger.info(f"query.data: {query.data}")      
+        logger.info(f"query.data: {query.data}") 
 
-        # Разделяем только по последнему подчёркиванию
         base_str, threshold_str = query.data.rsplit("_", 1)
         logger.info(f"base_str: '{base_str}', threshold_str: '{threshold_str}'")
 
-        if not base_str.startswith("setthreshold"):
+        if not base_str.startswith("setthreshold_"): # Исправлено: "_", чтобы корректно извлечь ID
             await query.answer("Неверный формат данных.", show_alert=True)
             return
 
-        cb_inline_message_id = base_str[len("setthreshold_"):]  # извлекаем всё, что после "setthreshold"
+        cb_inline_message_id = base_str[len("setthreshold_"):]
         chosen_threshold = int(threshold_str)
         logger.info(f"cb_inline_message_id: '{cb_inline_message_id}'")
         sender_user_id = str(query.from_user.id)
 
-        data = context.bot_data.get(cb_inline_message_id)
-        if not data:
-            await query.answer("История больше неактивна.", show_alert=True)
+        # Данные из context.bot_data, установленные в handle_inline_play
+        initial_setup_data = context.bot_data.get(cb_inline_message_id)
+        if not initial_setup_data or initial_setup_data.get("type") != "threshold_selection":
+            # Попытка загрузить из Firebase, если вдруг context.bot_data пуст (маловероятно здесь)
+            logger.warning(f"Initial setup data not found in context.bot_data for {cb_inline_message_id}. This is unusual in handle_set_vote_threshold.")
+            # Можно попробовать загрузить, но это скорее ошибка логики, если мы сюда попали без context.bot_data
+            await query.answer("Сессия настройки истекла или не найдена.", show_alert=True)
             return
 
-        target_user_id_str = data["target_user_id_str"]
-        story_id = data["story_id"]
-        fragment_id = data["fragment_id"]
+
+        target_user_id_str = initial_setup_data["target_user_id_str"]
+        story_id = initial_setup_data["story_id"]
+        # fragment_id здесь - это fragment_id, с которого начался выбор порога.
+        # Он станет current_fragment_id для первого отображения с голосованием.
+        initial_fragment_id = initial_setup_data["fragment_id"] 
 
         if sender_user_id != target_user_id_str:
             await query.answer("Только инициатор истории может установить порог.", show_alert=True)
@@ -750,23 +969,24 @@ async def handle_set_vote_threshold(update: Update, context: CallbackContext):
             
         await query.answer(f"Порог в {chosen_threshold} голосов установлен!")
 
-        all_data = load_data()
-        story_settings = all_data.setdefault("story_settings", {})
-        story_settings[query.inline_message_id] = {
-            "required_votes": chosen_threshold,
+        # Готовим данные для Firebase. Это первое сохранение состояния.
+        # launch_time будет добавлен автоматически функцией save_story_state_to_firebase.
+        story_initial_state = {
             "story_id": story_id,
             "target_user_id": target_user_id_str,
-            "original_fragment_id_for_setting": fragment_id
+            "current_fragment_id": initial_fragment_id, # Это фрагмент, для которого устанавливается порог и который будет отображен первым
+            "required_votes_to_win": chosen_threshold,
+            # poll_details пока не создаем, они будут созданы в display_fragment_for_interaction
+            # если у initial_fragment_id есть варианты выбора.
         }
-        save_data(all_data)
-        logger.info(f"Vote threshold set for {query.inline_message_id}: {chosen_threshold} votes for story {story_id}")
+        save_story_state_to_firebase(query.inline_message_id, story_initial_state)
+        logger.info(f"Vote threshold set and initial state saved for {query.inline_message_id}: {chosen_threshold} votes for story {story_id}, fragment {initial_fragment_id}")
 
         # Устанавливаем в context.bot_data информацию, необходимую для display_fragment_for_interaction
-        # Это более явный способ передать порог, чем просто надеяться на story_settings из файла.
         context.bot_data[query.inline_message_id] = {
             "type": "poll_setup_pending_display", # Специальный флаг
             "required_votes": chosen_threshold,
-            # Можно добавить и другие данные, если display_fragment_for_interaction их ожидает из bot_data
+            # story_id, target_user_id_str, initial_fragment_id уже передаются в display_fragment_for_interaction
         }
 
         await display_fragment_for_interaction(
@@ -774,36 +994,33 @@ async def handle_set_vote_threshold(update: Update, context: CallbackContext):
             query.inline_message_id,
             target_user_id_str,
             story_id,
-            fragment_id
+            initial_fragment_id # Показываем тот фрагмент, для которого настроили порог
         )
     except ValueError:
         await query.answer("Неверное значение порога.", show_alert=True)
     except Exception as e:
         logger.error(f"Ошибка в handle_set_vote_threshold: {e}", exc_info=True)
-        if query and not query.answer:
+        if query and hasattr(query, 'answer') and not query.answered:
             try:
                 await query.answer("Произошла ошибка при установке порога.")
             except Exception: pass
+
 
 
 async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str, winning_choice_idx: int, poll_data: dict):
     logger.info(f"Poll {inline_message_id} ending. Winning index: {winning_choice_idx}")
 
     choices_data = poll_data["choices_data"]
-    target_user_id = poll_data["target_user_id"] # Из poll_data
-    story_id = poll_data["story_id"]           # Из poll_data
+    target_user_id = poll_data["target_user_id"] 
+    story_id = poll_data["story_id"]      
     
-    context.bot_data.pop(inline_message_id, None) # Удаляем данные текущего опроса из памяти
-    
-    all_data = load_data()
-    #if inline_message_id in all_data.get("story_settings", {}):
-        #del all_data["story_settings"][inline_message_id]
-        #save_data(all_data)
-        #logger.info(f"Removed story_settings for completed poll {inline_message_id}")
+    # Удаляем данные текущего опроса из context.bot_data (в памяти)
+    # Firebase будет обновлен/очищен в display_fragment_for_interaction или при завершении
+    context.bot_data.pop(inline_message_id, None) 
 
     next_fragment_id_to_display = choices_data[winning_choice_idx]["next_fragment_id"]
     winner_text_choice = choices_data[winning_choice_idx]['text']
-    num_votes_for_winner = len(poll_data["votes"][winning_choice_idx])
+    num_votes_for_winner = len(poll_data["votes"].get(winning_choice_idx, set()))
 
     winner_message_text = f"Голосование завершено!\nВыбран вариант: \"{winner_text_choice}\" ({num_votes_for_winner} голосов)."
 
@@ -814,22 +1031,24 @@ async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str,
         logger.error(f"Error showing poll result for {inline_message_id}: {e}")
 
     if next_fragment_id_to_display:
-
-
+        # display_fragment_for_interaction позаботится о сохранении нового состояния в Firebase
+        # (либо новый опрос, либо просто фрагмент без опроса, тогда poll_details очистятся)
         await display_fragment_for_interaction(context, inline_message_id, target_user_id, story_id, next_fragment_id_to_display)
-    else: # Нет следующего фрагмента
+    else: 
         logger.info(f"No next fragment to display after poll for {inline_message_id}. Story might be ending.")
         final_text = winner_message_text + "\n\nИстория завершена или следующий шаг не определен."
         try:
             await context.bot.edit_message_text(inline_message_id=inline_message_id, text=final_text, reply_markup=None)
-            # Здесь можно удалить story_settings, так как сессия по этому inline_message_id завершается
-            all_data = load_data()
-            if inline_message_id in all_data.get("story_settings", {}):
-                del all_data["story_settings"][inline_message_id]
-                save_data(all_data)
-                logger.info(f"Removed story_settings for completed inline session {inline_message_id}")
+            
+            # Удаляем всю запись о story_settings из Firebase, так как история завершена
+            ref = db.reference(f'story_settings/{inline_message_id}') # Замените db.reference
+            ref.delete()
+            logger.info(f"Removed story_settings from Firebase for completed inline session {inline_message_id}")
+
         except Exception as e:
-            logger.error(f"Error updating message when no next fragment after poll: {e}")
+            logger.error(f"Error updating message or deleting Firebase data when no next fragment: {e}")
+
+
 
 
 async def handle_poll_vote(update: Update, context: CallbackContext):
@@ -839,10 +1058,16 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
     try:
         parts = query.data.rsplit("_", 1)
         if len(parts) != 2: await query.answer("Ошибка формата.", show_alert=True); return
-        choice_idx_str, vote_prefix_msg_id = parts[1], parts[0]
         
-        vote_parts = vote_prefix_msg_id.split("_", 1)
-        if len(vote_parts) != 2 or vote_parts[0] != "vote": await query.answer("Ошибка формата.", show_alert=True); return
+        # callback_data=f"vote_{inline_message_id}_{idx}"
+        # parts[0] = vote_{inline_message_id}
+        # parts[1] = idx
+        callback_prefix_and_msg_id = parts[0]
+        choice_idx_str = parts[1]
+        
+        vote_parts = callback_prefix_and_msg_id.split("_", 1) # vote, inline_message_id
+        if len(vote_parts) != 2 or vote_parts[0] != "vote": 
+            await query.answer("Ошибка формата callback (prefix).", show_alert=True); return
         
         inline_msg_id_from_cb = vote_parts[1]
         if inline_msg_id_from_cb != query.inline_message_id:
@@ -854,22 +1079,81 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
 
         poll_data = context.bot_data.get(query.inline_message_id)
 
+        # Если нет в памяти, пытаемся загрузить из Firebase
         if not poll_data or poll_data.get("type") != "poll":
+            logger.info(f"Poll data for {query.inline_message_id} not in memory or invalid type. Attempting Firebase load.")
+            story_state_from_firebase = load_story_state_from_firebase(query.inline_message_id)
+
+            if not story_state_from_firebase or "poll_details" not in story_state_from_firebase:
+                await query.answer("Голосование не найдено, завершено или неактуально.", show_alert=True)
+                logger.warning(f"Could not find/load active poll state for vote on {query.inline_message_id} from Firebase.")
+                return
+
+            # Мы здесь: story_state_from_firebase загружен, poll_data ещё None → сравнение сделаем без него
+            current_fragment_id_fb = story_state_from_firebase.get("current_fragment_id")
+            poll_details_fb = story_state_from_firebase["poll_details"]
+
+            rehydrated_poll_data = {
+                "type": "poll",
+                "target_user_id": story_state_from_firebase["target_user_id"],
+                "story_id": story_state_from_firebase["story_id"],
+                "current_fragment_id": current_fragment_id_fb,
+                "choices_data": poll_details_fb.get("choices_data", []),
+                "votes": {int(k): v_set for k, v_set in poll_details_fb.get("votes", {}).items()},  # Приводим ключи к int
+                "voted_users": poll_details_fb.get("voted_users", set()),
+                "required_votes_to_win": story_state_from_firebase["required_votes_to_win"]
+            }
+
+            # Убедимся, что fragment тот же, только теперь с новым poll_data
+            if poll_data and current_fragment_id_fb != poll_data.get("current_fragment_id"):
+                await query.answer("Голосование не найдено, завершено или неактуально.", show_alert=True)
+                logger.warning(f"Loaded poll state doesn't match fragment for vote on {query.inline_message_id}.")
+                return
+
+            context.bot_data[query.inline_message_id] = rehydrated_poll_data
+            poll_data = rehydrated_poll_data
+
+        # Проверки после того, как poll_data точно есть (из памяти или Firebase)
+        if not poll_data or poll_data.get("type") != "poll": # Повторная проверка на всякий случай
             await query.answer("Голосование не найдено или завершено.", show_alert=True)
             return
 
         if user_id in poll_data["voted_users"]:
             await query.answer("Вы уже голосовали.", show_alert=True)
             return
+        
+        # Проверяем, что choice_idx допустим
+        if choice_idx < 0 or choice_idx >= len(poll_data["choices_data"]):
+            await query.answer("Некорректный вариант выбора.", show_alert=True)
+            logger.warning(f"Invalid choice_idx {choice_idx} for poll {query.inline_message_id}")
+            return
 
-        poll_data["votes"][choice_idx].add(user_id)
+
+        poll_data["votes"].setdefault(choice_idx, set()).add(user_id) # Убедимся, что ключ существует
         poll_data["voted_users"].add(user_id)
         
+        # Сохраняем обновленное состояние голосования в Firebase
+        # Формируем данные для сохранения, включая poll_details
+        firebase_save_data = {
+            "story_id": poll_data["story_id"],
+            "target_user_id": poll_data["target_user_id"],
+            "current_fragment_id": poll_data["current_fragment_id"],
+            "required_votes_to_win": poll_data["required_votes_to_win"],
+            "poll_details": {
+                "choices_data": poll_data["choices_data"],
+                "votes": poll_data["votes"], # Будет сконвертировано в save_story_state_to_firebase
+                "voted_users": poll_data["voted_users"] # Будет сконвертировано
+            }
+            # launch_time будет сохранено из существующего значения в Firebase
+        }
+        save_story_state_to_firebase(query.inline_message_id, firebase_save_data)
+        logger.info(f"Vote cast and state saved for {query.inline_message_id}, choice {choice_idx}")
+
         required_votes_to_win = poll_data["required_votes_to_win"]
         num_votes_for_current_choice = len(poll_data["votes"][choice_idx])
 
         if num_votes_for_current_choice >= required_votes_to_win:
-            await query.answer(f"Голос принят! Вариант набрал {required_votes_to_win} голосов!", show_alert=False) # Краткий ответ
+            await query.answer(f"Голос принят! Вариант набрал {required_votes_to_win} голосов!", show_alert=False)
             await end_poll_and_proceed(context, query.inline_message_id, choice_idx, poll_data)
             return 
 
@@ -877,83 +1161,93 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
         
         new_keyboard = []
         for idx, choice_info in enumerate(poll_data["choices_data"]):
-            num_votes = len(poll_data["votes"][idx])
+            num_votes = len(poll_data["votes"].get(idx, set()))
             new_keyboard.append([InlineKeyboardButton(
                 f"({num_votes}/{required_votes_to_win}) {choice_info['text']}",
                 callback_data=f"vote_{query.inline_message_id}_{idx}"
             )])
         
         await context.bot.edit_message_reply_markup(inline_message_id=query.inline_message_id, reply_markup=InlineKeyboardMarkup(new_keyboard))
-    except ValueError:
-        await query.answer("Неверный выбор.", show_alert=True)
+    
+    except ValueError: # например, при int(choice_idx_str)
+        await query.answer("Неверный выбор (ошибка значения).", show_alert=True)
+        logger.warning(f"ValueError during poll vote for {query.data}", exc_info=True)
     except Exception as e:
         logger.error(f"Ошибка в handle_poll_vote: {e}", exc_info=True)
-        if query and not query.answer:
+        if query and hasattr(query, 'answer') and not query.answered:
             try: await query.answer("Ошибка при голосовании.")
             except Exception: pass
 
 
 
-async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query_text = update.inline_query.query.strip().lower() # Renamed 'query' to 'query_text' to avoid conflict
-    results = []
+def is_possible_story_id(text: str) -> bool:
+    return bool(re.fullmatch(r'[0-9a-f]{10}', text.lower()))
 
-    all_data = load_data()
-    users_story_data = all_data.get("users_story", {}) # Renamed 'users_story' to 'users_story_data'
+async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query_text = update.inline_query.query.strip()
+    results = []
     user_id = str(update.inline_query.from_user.id)
+    stories_to_show = {}
 
     def format_story_text(story_id: str, story_data: dict) -> str:
         title = story_data.get("title", "Без названия")
         neural = story_data.get("neural", False)
         author = story_data.get("author")
-        lines = [f"📖 <b>История:</b> «{clean_caption(title)}»"] # clean_caption for title too
+        lines = [f"📖 <b>История:</b> «{clean_caption(title)}»"]
         if author:
             lines.append(f"✍️ <b>Автор:</b> {clean_caption(author)}{' (нейроистория)' if neural else ''}")
         lines.append(f"🆔 <b>ID:</b> <code>{story_id}</code>")
         lines.append("\n<i>Нажмите кнопку ниже, чтобы настроить и запустить историю в этом чате.</i>")
         return "\n".join(lines)
 
-    stories_to_show = {}
-    if not query_text: # Показываем все истории пользователя
-        stories_to_show = users_story_data.get(user_id, {})
-    else: # Ищем по ID или названию среди всех доступных (или только пользовательских - зависит от вашей логики доступа)
-        # В данном коде поиск идет по всем историям всех пользователей, если query_text не пустой
-        for uid, user_stories_dict in users_story_data.items():
-            for story_id_key, story_content in user_stories_dict.items():
-                title = story_content.get("title", "Без названия").lower()
-                if query_text in story_id_key.lower() or query_text in title:
-                    # Чтобы избежать дублирования, если история найдена у нескольких пользователей (маловероятно с UUID)
-                    # или если пользователь ищет свою же историю по названию
-                    if story_id_key not in stories_to_show : # Покажем только первое совпадение по ID
-                         stories_to_show[story_id_key] = story_content
+    if not query_text:
+        # Показываем все истории текущего пользователя
+        user_stories_ref = db.reference(f'users_story/{user_id}')
+        stories_to_show = user_stories_ref.get() or {}
+    else:
+        query_text_lower = query_text.lower()
+        is_id_search = is_possible_story_id(query_text_lower)
 
+        if is_id_search:
+            # Поиск по всем историям всех пользователей только по ID
+            all_users_data = db.reference('users_story').get() or {}
+            for uid, user_stories_dict in all_users_data.items():
+                if query_text_lower in user_stories_dict:
+                    stories_to_show[query_text_lower] = user_stories_dict[query_text_lower]
+                    break  # Нашли — достаточно
+        else:
+            # Поиск по заголовкам только среди историй текущего пользователя
+            user_stories = db.reference(f'users_story/{user_id}').get() or {}
+            for story_id_key, story_content in user_stories.items():
+                title = story_content.get("title", "").lower()
+                if query_text_lower in title:
+                    stories_to_show[story_id_key] = story_content
 
     for story_id, story_data in stories_to_show.items():
-
-        owner_user_id_for_story = user_id # По умолчанию текущий пользователь
-        if query_text: # Если был поиск, нужно найти реального владельца
-            for u_id, u_stories in users_story_data.items():
-                if story_id in u_stories:
-                    owner_user_id_for_story = u_id
+        # Определяем владельца (нужно только если поиск был по ID)
+        owner_user_id_for_story = user_id
+        if is_possible_story_id(query_text):
+            all_users_data = db.reference('users_story').get() or {}
+            for uid, user_stories_dict in all_users_data.items():
+                if story_id in user_stories_dict:
+                    owner_user_id_for_story = uid
                     break
-        
+
         buttons = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶️ Настроить и играть здесь", callback_data=f"inlineplay_{owner_user_id_for_story}_{story_id}_main_1")],
-            # main_1 - это ID первого фрагмента по умолчанию, убедитесь, что он существует.
             [InlineKeyboardButton("▶️ Открыть в чате с ботом", url=f"https://t.me/{context.bot.username}?start={story_id}")]
         ])
         results.append(InlineQueryResultArticle(
-            id=str(uuid4()), # Уникальный ID для результата
+            id=str(uuid4()),
             title=f"История: {story_data.get('title', 'Без названия')}",
             description=f"Автор: {story_data.get('author', 'Неизвестен')}",
             input_message_content=InputTextMessageContent(format_story_text(story_id, story_data), parse_mode="HTML"),
             reply_markup=buttons
         ))
-        if len(results) >= 49: # Telegram ограничивает количество результатов (обычно 50)
+        if len(results) >= 49:
             break
-            
-    await update.inline_query.answer(results, cache_time=10) # Небольшое кэширование
 
+    await update.inline_query.answer(results, cache_time=10)
 
 
 
@@ -1019,9 +1313,13 @@ async def receive_coop_user_id(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад к списку историй", callback_data="view_stories")]])
 
     if new_user_id:
-        all_data = load_data()
-        user_stories = all_data.get("users_story", {}).get(user_id_str, {})
-        story_data = user_stories.get(story_id, {})
+        story_data = load_user_story(user_id_str, story_id)
+        if not story_data:
+            await update.message.reply_text(
+                "❌ Не удалось загрузить историю. Возможно, она была удалена.",
+                reply_markup=keyboard
+            )
+            return EDIT_STORY_MAP
 
         coop_list = story_data.setdefault("coop_edit", [])
         if new_user_id not in coop_list:
@@ -1118,9 +1416,7 @@ async def receive_coop_user_id_to_remove(update: Update, context: ContextTypes.D
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад к списку историй", callback_data="view_stories")]])
 
     if remove_user_id:
-        all_data = load_data()
-        user_stories = all_data.get("users_story", {}).get(user_id_str, {})
-        story_data = user_stories.get(story_id, {})
+        story_data = load_user_story(user_id_str, story_id)
 
         coop_list = story_data.setdefault("coop_edit", [])
         if remove_user_id in coop_list:
@@ -1451,17 +1747,10 @@ async def handle_delete_fragment_execute(update: Update, context: ContextTypes.D
         # В вашем коде user_id не передается в callback_data для dfre, он берется из update.effective_user.id
         # Это нормально, если владелец истории определяется по user_id_str, связанному с story_data.
 
-        all_data = load_data()
 
-        # ✅ Получаем владельца истории с учётом совместных редакторов
-        try:
-            owner_id_str = get_owner_id_or_raise(user_id_str, story_id, all_data)
-        except PermissionError as e:
-            await query.edit_message_text("У вас нет доступа для редактирования этой истории.")
-            return EDIT_STORY_MAP
-
-        user_stories = all_data.setdefault("users_story", {}).setdefault(owner_id_str, {})
-        story_data = user_stories.get(story_id)
+        story_data = load_user_story(user_id_str, story_id)
+        user_id = int(user_id_str)
+        owner_id_str = get_owner_id_or_raise(user_id, story_id, story_data)
 
         if not story_data or "fragments" not in story_data:
             await query.edit_message_text("Ошибка: История или фрагменты не найдены.")
@@ -1520,7 +1809,6 @@ async def handle_delete_fragment_execute(update: Update, context: ContextTypes.D
                     all_fragments[frag_id]["choices"] = new_choices
         
         # --- Сохраняем изменения ---
-        user_stories[story_id] = story_data
         if 'current_story' in context.user_data and context.user_data.get('story_id') == story_id:
             context.user_data['current_story'] = story_data
 
@@ -1712,17 +2000,11 @@ async def handle_delete_fragment_confirm(update: Update, context: ContextTypes.D
 
         logger.info(f"Parsed story_id: {story_id}, fragment_id: {target_fragment_id}, user_id: {requesting_user_id_str}")
 
-        all_data = load_data()
-        
+
+        story_data = load_user_story(requesting_user_id_str, story_id)        
         # Определим владельца истории с учётом прав доступа
-        try:
-            owner_id_str = get_owner_id_or_raise(requesting_user_id_str, story_id, all_data)
-        except PermissionError:
-            await safe_edit_or_resend(query, context, "Ошибка: У вас нет доступа к редактированию этой истории.")
-            return EDIT_STORY_MAP
-
-        story_data = all_data.get("users_story", {}).get(owner_id_str, {}).get(story_id)
-
+        user_id = int(requesting_user_id_str)
+        owner_id_str = get_owner_id_or_raise(user_id, story_id, story_data)
         if not story_data or "fragments" not in story_data:
             await safe_edit_or_resend(query, context, "Ошибка: История или фрагменты не найдены.")
             return EDIT_STORY_MAP
@@ -2321,10 +2603,10 @@ def build_fragment_keyboard(
                 pagination_row.append(InlineKeyboardButton(" ", callback_data="ignore_"))
 
             keyboard.append(pagination_row)
-    if len(sorted_fragment_ids) > 15 or legend_too_long:
-        keyboard.append([
-            InlineKeyboardButton("🗺️ Посмотреть карту", callback_data=f"show_map_{story_id}")
-        ])
+
+    keyboard.append([
+        InlineKeyboardButton("🗺️ Посмотреть карту", callback_data=f"show_map_{story_id}")
+    ])
     # --- Кнопки навигации ---
     keyboard.append([InlineKeyboardButton("❔ Помощь по этому окну", callback_data="edithelp")])    
     keyboard.append([InlineKeyboardButton("◀️ Назад к списку историй", callback_data="view_stories")])
@@ -2485,9 +2767,7 @@ async def toggle_story_public_status(update: Update, context: ContextTypes.DEFAU
             )
             return None
 
-        all_data = load_data()
-        user_stories = all_data.get("users_story", {}).get(user_id_from_callback, {})
-        story_data = user_stories.get(story_id_from_callback)
+        story_data = load_user_story(user_id_from_callback, story_id_from_callback)
 
         if not story_data:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="Ошибка: История не найдена.")
@@ -2510,8 +2790,7 @@ async def toggle_story_public_status(update: Update, context: ContextTypes.DEFAU
             action_taken = True
 
         elif action_prefix_part == MAKE_PRIVATE_PREFIX and story_data.get("public", False):
-            story_data.pop("public", None)
-            story_data.pop("user_name", None)
+            story_data["public"] = False
             save_story_data(user_id_from_callback, story_id_from_callback, story_data)
             logger.info(f"История {story_id_from_callback} (user: {user_id_from_callback}) убрана из публичных.")
             await query.answer("ℹ️ История убрана из публичных.", show_alert=True)
@@ -2564,57 +2843,46 @@ async def download_story_handler(update: Update, context: ContextTypes.DEFAULT_T
         parts = callback_data.split('_', 3)
         user_id_from_callback = parts[2]
         story_id_from_callback = parts[3]
-
-        all_data = load_data()
         current_user_id = str(update.effective_user.id)
 
-        try:
-            # Проверим, имеет ли текущий пользователь доступ
-            owner_id = get_owner_id_or_raise(current_user_id, story_id_from_callback, all_data)
-        except PermissionError:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Вы не можете скачать эту историю — у вас нет доступа."
-            )
-            await query.answer()
+        # Загружаем историю напрямую по owner_id (user_id_from_callback)
+
+        story_data = load_user_story(user_id_from_callback, story_id_from_callback)
+
+
+        if not story_data:
+            await query.edit_message_text("История не найдена.")
             return context.user_data.get('current_conversation_state', EDIT_STORY_MAP)
 
-        # Получаем данные истории от владельца
-        user_stories = all_data.get("users_story", {}).get(owner_id, {})
-        story_data_to_download = user_stories.get(story_id_from_callback)
 
-        if not story_data_to_download:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="История не найдена для скачивания."
-            )
-            await query.answer()
-            return context.user_data.get('current_conversation_state', EDIT_STORY_MAP)
+
+
+
+
 
         await query.answer("История найдена, готовлю файл...")
 
 
-        story_json = json.dumps(story_data_to_download, ensure_ascii=False, indent=4)
+
+        story_json = json.dumps(story_data, ensure_ascii=False, indent=4)
         json_bytes = story_json.encode('utf-8')
         
         file_to_send = BytesIO(json_bytes)
         filename = f"story_{story_id_from_callback}.json"
 
         await context.bot.send_document(
-            chat_id=update.effective_chat.id, # Отправляем в чат, где был запрос
+            chat_id=update.effective_chat.id,
             document=file_to_send,
             filename=filename,
-            caption=f"JSON файл для истории \"{story_data_to_download.get('title', story_id_from_callback)}\""
+            caption=f"JSON файл для истории \"{story_data.get('title', story_id_from_callback)}\""
         )
         logger.info(f"История {story_id_from_callback} (user: {user_id_from_callback}) отправлена как JSON.")
-        # Не редактируем исходное сообщение с кнопками, а отправляем новое с файлом.
-        # Ответ на query уже был.
-
+        
         return context.user_data.get('current_conversation_state', EDIT_STORY_MAP)
 
     except Exception as e:
         logger.exception(f"Ошибка в download_story_handler для data {callback_data}:")
-        await query.answer("Произошла ошибка при подготовке файла.") # Отвечаем на callback
+        await query.answer("Произошла ошибка при подготовке файла.")
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Произошла ошибка при скачивании истории.")
         return context.user_data.get('current_conversation_state', EDIT_STORY_MAP)
 
@@ -2639,9 +2907,7 @@ async def toggle_neuro_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.answer("Вы не можете изменить режим этой истории. Обратитесь к владельцу истории.", show_alert=True)
             return None
 
-        all_data = load_data()
-        user_stories = all_data.get("users_story", {}).get(user_id_from_callback, {})
-        story_data = user_stories.get(story_id_from_callback)
+        story_data = load_user_story(user_id_from_callback, story_id_from_callback)
 
         if not story_data:
             await query.answer("Ошибка: История не найдена.", show_alert=True)
@@ -2653,7 +2919,7 @@ async def toggle_neuro_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await query.answer("🤖 Нейрорежим включён. Теперь пустые фрагменты вашей истории будут генерироваться автоматически.", show_alert=True)
             changed = True
         elif action_prefix == DISABLE_NEURO_MODE_PREFIX and story_data.get("neuro_fragments", False):
-            story_data.pop("neuro_fragments", None)
+            story_data["neuro_fragments"] = False
             await query.answer("🧠 Нейрорежим выключен. Теперь пустые фрагменты вашей истории вы можете добавить только самостоятельно.", show_alert=True)
             changed = True
         else:
@@ -2847,6 +3113,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await edithelp_callback(update, context)
         return None
 
+    elif data.startswith('delete_story_'):
+        await confirm_delete_story(update, context)
+        return None
+
+    elif data.startswith('confirm_delete'):
+        await delete_story_confirmed(update, context)
+        return None
+
+
     elif data.startswith("send_story_map_doc_"):
         # Разбиваем всё
         parts = data.split("_")
@@ -2860,8 +3135,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.info(f"user_id_str {user_id_str}.")   
             logger.info(f"story_id {story_id}.")  
             logger.info(f"fragment_id {fragment_id}.")                               
-            all_data = load_data()
-            story_data = all_data.get("users_story", {}).get(user_id_str, {}).get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
             logger.info(f"story_data {story_data}.")
         else:
             logger.warning("Неверный формат callback data.")       
@@ -3047,20 +3321,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         story_id, fragment_id = match.groups()
         user_id_str = str(update.effective_user.id)
-        all_data = load_data()
 
-        try:
-            owner_id_str = get_owner_id_or_raise(user_id_str, story_id, all_data)
-        except PermissionError:
-            await safe_edit_or_resend(query, context, "Ошибка: У вас нет доступа к этой истории.")
-            return
+        # Загружаем только одну историю пользователя
+        story_data = load_user_story(user_id_str, story_id)
 
-        story_data = all_data.get("users_story", {}).get(owner_id_str, {}).get(story_id)
+        # Если пользователь не владелец, пытаемся найти владельца
+
         if not story_data:
-            await safe_edit_or_resend(query, context, "Ошибка: История не найдена.")
+            await query.edit_message_text("История не найдена.")
             return
 
-        all_fragments = story_data.get("fragments", {})
+        all_fragments = story_data.get("fragments", {})   
         if fragment_id not in all_fragments:
             await safe_edit_or_resend(query, context, f"Ошибка: Фрагмент <code>{fragment_id}</code> не найден.", parse_mode=ParseMode.HTML)
             return
@@ -3118,18 +3389,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         story_id = data[len('show_map_'):]
         user_id_str = str(update.effective_user.id)
 
-        all_data = load_data()
 
-        try:
-            owner_id = get_owner_id_or_raise(user_id_str, story_id, all_data)
-        except PermissionError:
-            await query.answer("История не найдена или у вас нет доступа.", show_alert=True)
-            return
+        # Загружаем только нужную историю
+        story_data = load_user_story(user_id_str, story_id)
 
-        story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
+        # Если не нашли — ищем среди всех пользователей
+
         if not story_data:
-            await query.answer("История не найдена.", show_alert=True)
+            await query.edit_message_text("История не найдена.")
             return
+
 
         await query.answer()  # Закрыть анимацию загрузки
 
@@ -3164,33 +3433,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _, _, user_id_str, story_id = data.split('_', 3)
             logger.info(f"Initial edit_story_ callback. User: {user_id_str}, Story: {story_id}")
 
-            all_data = load_data()
-            user_stories = all_data.get("users_story", {}).get(user_id_str, {})
-            story_data = user_stories.get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
+
+            user_id = int(user_id_str)
+            owner_id_str = get_owner_id_or_raise(user_id, story_id, story_data)
 
             # Если не нашли — ищем среди всех пользователей
             if not story_data:
-                for uid, stories in all_data.get("users_story", {}).items():
-                    if story_id in stories:
-                        possible_story = stories[story_id]
-                        coop_editors = possible_story.get("coop_edit", [])
-                        if str(update.effective_user.id) in coop_editors or str(update.effective_user.id) == uid:
-                            user_id_str = uid  # Обновим владельца истории
-                            story_data = possible_story
-                            break
-
-            # Если после всех проверок всё ещё нет доступа
-            if not story_data:
                 await query.edit_message_text("История не найдена.")
-                return None
+                return
 
-            # Проверка прав на редактирование
-            current_user_id = str(update.effective_user.id)
-            coop_editors = story_data.get("coop_edit", [])
-
-            if current_user_id != user_id_str and current_user_id not in coop_editors:
-                await query.edit_message_text("Вы не можете редактировать эту историю.")
-                return None
 
             # Здесь мы всегда начинаем с первой страницы
             current_page = 1
@@ -3220,9 +3472,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             fragment_ids_for_legend = sorted_full_fragment_ids[(current_page-1)*FRAGMENT_BUTTONS_PER_PAGE: current_page*FRAGMENT_BUTTONS_PER_PAGE]
             legend_text = build_legend_text(story_data, fragment_ids_for_legend)
             legend_too_long = len(legend_text) > 800
-            reply_markup = build_fragment_keyboard(user_id_str, story_id, fragment_ids, current_page, story_data, legend_too_long)            
+            reply_markup = build_fragment_keyboard(owner_id_str, story_id, fragment_ids, current_page, story_data, legend_too_long)            
             logger.info(f"legend_text {legend_text}.")             
-            if total_fragments <= 15 and len(legend_text) <= 700:
+            if total_fragments <= 15 and len(legend_text) <= 800:
                 edited = True
                 sent_wait_message = None
 
@@ -3297,7 +3549,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             # Сохраняем данные в user_data, включая текущую страницу
             context.user_data['story_id'] = story_id
-            context.user_data['user_id_str'] = user_id_str
+            context.user_data['user_id_str'] = owner_id_str
             context.user_data['current_story'] = story_data
             context.user_data['current_fragment_page'] = current_page
 
@@ -3318,25 +3570,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _, user_id_str, story_id, page = data.split('_')
             current_page = int(page)
 
-            all_data = load_data()
+            # Пробуем сначала загрузить историю по user_id_str
+            story_data = load_user_story(user_id_str, story_id)
+            
 
-            try:
-                # Проверка доступа: получаем ID владельца, если у пользователя есть права
-                owner_id = get_owner_id_or_raise(str(update.effective_user.id), story_id, all_data)
-            except PermissionError:
-                await query.answer("У вас нет доступа к нейропомощи по этой истории.", show_alert=True)
-                return None
-
-            story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
             if not story_data:
                 await query.edit_message_text("История не найдена.")
-                return None
+                return
 
             raw_fragment_keys = list(story_data.get("fragments", {}).keys())
             sorted_fragment_ids = sorted(raw_fragment_keys, key=get_fragment_sort_key)
             fragment_ids_for_legend = sorted_fragment_ids[(current_page - 1) * FRAGMENT_BUTTONS_PER_PAGE : current_page * FRAGMENT_BUTTONS_PER_PAGE]
             legend_text = build_legend_text(story_data, fragment_ids_for_legend)
 
+            user_id = int(user_id_str)
+            owner_id = get_owner_id_or_raise(user_id, story_id, story_data)
             reply_markup = build_neuro_fragment_keyboard(owner_id, story_id, sorted_fragment_ids, current_page)
 
             await query.message.reply_text(
@@ -3356,15 +3604,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _, user_id_str, story_id, page = data.split('_')
             current_page = int(page)
 
-            all_data = load_data()
-
-            try:
-                owner_id = get_owner_id_or_raise(str(update.effective_user.id), story_id, all_data)
-            except PermissionError:
-                await query.answer("У вас нет доступа квыбору фрагмента по нейропомощи в этой истории.", show_alert=True)
-                return
-
-            story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
             if not story_data:
                 await query.edit_message_text("История не найдена.")
                 return
@@ -3374,6 +3614,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             fragment_ids_for_legend = sorted_fragment_ids[(current_page - 1) * FRAGMENT_BUTTONS_PER_PAGE : current_page * FRAGMENT_BUTTONS_PER_PAGE]
             legend_text = build_legend_text(story_data, fragment_ids_for_legend)
 
+            user_id = int(user_id_str)
+            owner_id = get_owner_id_or_raise(user_id, story_id, story_data)
             reply_markup = build_neuro_fragment_keyboard(owner_id, story_id, sorted_fragment_ids, current_page)
 
             await query.edit_message_text(
@@ -3394,16 +3636,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             context.user_data['neuro_fragment_id'] = fragment_id
 
             user_id_str = str(update.effective_user.id)
-            all_data = load_data()
-
-            try:
-                # Получаем ID владельца истории, если есть доступ
-                owner_id = get_owner_id_or_raise(user_id_str, story_id, all_data)
-            except PermissionError:
-                await query.edit_message_text("Недоступно.")
-                return None
-
-            story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
             if not story_data:
                 await query.edit_message_text("История не найдена.")
                 return None
@@ -3458,15 +3691,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await query.answer("Ошибка: неверный номер страницы.", show_alert=True)
                 return
 
-            all_data = load_data()
+            story_data = load_user_story(user_id_str, story_id)
 
-            try:
-                owner_id = get_owner_id_or_raise(str(update.effective_user.id), story_id, all_data)
-            except PermissionError:
-                await query.answer("У вас нет доступа к этой истории.", show_alert=True)
-                return
+            user_id = int(user_id_str)
+            owner_id = get_owner_id_or_raise(user_id, story_id, story_data)
 
-            story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
+
             if not story_data:
                 logger.warning(f"История не найдена для пагинации: {story_id} user: {owner_id}")
                 await query.answer("История не найдена.", show_alert=True)
@@ -3570,8 +3800,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             logging.info(f"user_id_str: {user_id_str}, story_id: {story_id}, current_page: {current_page}")
 
-            all_data = load_data()
-            story_data = all_data.get("users_story", {}).get(user_id_str, {}).get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
             if not story_data:
                 await query.message.reply_text("История не найдена.")
                 return None
@@ -3792,21 +4021,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             logger.info(f"Выбор ветки: user_id={user_id_str}, story_id={story_id}, branch_name={branch_name}")
             
-            all_data = load_data()  # Загружаем все данные
-
-            try:
-                # Проверяем, есть ли доступ у пользователя
-                owner_id = get_owner_id_or_raise(str(update.effective_user.id), story_id, all_data)
-            except PermissionError:
-                await query.edit_message_text("Вы не можете просматривать эту ветку.")
-                return None
-
-            # Получаем данные истории от владельца
-            story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
 
             if not story_data:
                 await query.edit_message_text("История не найдена.")
                 return None
+                
+            user_id = int(user_id_str)
+            owner_id = get_owner_id_or_raise(user_id, story_id, story_data)
+
 
             all_story_fragments = story_data.get("fragments", {})
             branch_fragment_ids = [
@@ -3924,15 +4147,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             story_id, branch_name = payload.split('_', 1)
             user_id_str = str(update.effective_user.id)
 
-            all_data = load_data()
-
-            try:
-                owner_id = get_owner_id_or_raise(user_id_str, story_id, all_data)
-            except PermissionError:
-                await query.answer("У вас нет доступа к картам веток.", show_alert=True)
-                return None
-
-            story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
             if not story_data:
                 await query.answer("История не найдена.", show_alert=True)
                 return None
@@ -3979,17 +4194,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _, user_id_str, story_id, branch_name, page_str = data.split('_', 4)
             current_page = int(page_str)
 
-            all_data = load_data()
-            effective_user_id_str = str(update.effective_user.id)
-
-            # Получаем владельца истории или исключение
-            try:
-                owner_id = get_owner_id_or_raise(effective_user_id_str, story_id, all_data)
-            except PermissionError:
-                await query.edit_message_text("Действие недоступно.")
-                return None
-
-            story_data = all_data.get("users_story", {}).get(owner_id, {}).get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
             if not story_data:
                 await query.edit_message_text("История не найдена.")
                 return None
@@ -3999,7 +4204,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 [frag_id for frag_id in all_story_fragments if frag_id == branch_name or frag_id.startswith(branch_name + "_")],
                 key=get_fragment_sort_key
             )
-
+            user_id = int(user_id_str)
+            owner_id = get_owner_id_or_raise(user_id, story_id, story_data)
             # Обновляем user_data
             context.user_data['current_branch_page'] = current_page
 
@@ -4101,10 +4307,6 @@ async def handle_neuralstart_story_callback(update: Update, context: ContextType
     else:
         username_display = f"id:{user.id}"
 
-    # Получаем данные из JSON
-    data = load_data()
-    all_user_stories = data.get("users_story", {})
-
     # Извлекаем story_id из callback_suffix
     parts = callback_suffix.split("_")
     if len(parts) < 3:
@@ -4114,15 +4316,17 @@ async def handle_neuralstart_story_callback(update: Update, context: ContextType
     story_id = parts[1]
     logging.info(f"story_id: {story_id}")    
     fragment_id = "_".join(parts[2:])
-    story_data = None
-    for user_stories in all_user_stories.values():
-        if story_id in user_stories:
-            story_data = user_stories[story_id]
-            break
 
+
+    # Получаем данные из JSON
+    story_data = load_user_story(user_id, story_id)
     if not story_data:
         await query.message.reply_text("⚠️ История не найдена.")
         return
+
+
+
+
 
     title = story_data.get("title", "Без названия")
     neural = story_data.get("neural", False)
@@ -4197,7 +4401,7 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
 
             # 👉 Добавляем автора:
             generated_story["author"] = f"{username}"
-
+            generated_story["owner_id"] = f"{user_id}"
 
             save_story_data(user_id_str, story_id, generated_story)
 
@@ -4261,6 +4465,7 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data['current_story'] = {
         "title": title,
         "author": username,  # <--- Сохраняем имя автора
+        "owner_id": user_id_str,  # <--- Сохраняем имя автора        
         "fragments": {}
     }
     context.user_data['current_fragment_id'] = "main_1"
@@ -4326,6 +4531,8 @@ async def add_content_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not context.user_data.get('story_id'):
         await message.reply_text("Похоже, произошла ошибка или вы отменили создание. Начните заново с /start.")
         return ConversationHandler.END
+
+
 
     user_id_str = context.user_data['user_id_str']
     fragment_id = context.user_data['current_fragment_id']
@@ -5029,32 +5236,17 @@ async def show_fragment_actions(update: Update, context: ContextTypes.DEFAULT_TY
     user_id_str = str(update.effective_user.id)
 
     # Загрузка всех данных
-    all_data = load_data()
-    users_story = all_data.get("users_story", {})
+    # Загружаем историю с учётом coop_edit-доступа
+    story_data = load_user_story(user_id_str, story_id)
 
-    # Поиск владельца истории
-    story_owner_id = None
-    for owner_id, stories in users_story.items():
-        if story_id in stories:
-            story = stories[story_id]
-            coop_editors = story.get("coop_edit", [])
-            if owner_id == user_id_str or user_id_str in coop_editors:
-                story_owner_id = owner_id
-                break
-
-    if story_owner_id is None:
-        # Пользователь не имеет доступа к истории
+    if not story_data:
         await update.effective_message.reply_text("У вас нет доступа к просмотру этой истории.")
         return ConversationHandler.END
 
-    # Устанавливаем корректный user_id_str (владельца)
-    context.user_data['user_id_str'] = story_owner_id
+    # Сохраняем историю и user_id владельца (если нужно — можно определить его отдельно)
+    context.user_data['current_story'] = copy.deepcopy(story_data)
 
-    # Устанавливаем текущую историю
-    context.user_data['current_story'] = copy.deepcopy(users_story[story_owner_id][story_id])
-    story_data = context.user_data['current_story']
-
-    current_fragment = story_data["fragments"].get(fragment_id)
+    current_fragment = story_data.get("fragments", {}).get(fragment_id)
     if not current_fragment:
         logger.error(f"Фрагмент {fragment_id} не найден в истории {story_id}")
         target_message = update.message or (update.callback_query.message if update.callback_query else None)
@@ -5365,21 +5557,26 @@ async def select_link_target_handler(update: Update, context: ContextTypes.DEFAU
 
 
 
-    all_data = load_data()
+    story_data = load_user_story(user_id_str, story_id)
+
+    if not story_data:
+        await update.effective_message.reply_text("У вас нет доступа к просмотру этой истории.")
+        return ConversationHandler.END
 
     try:
-        actual_owner_id = get_owner_id_or_raise(user_id_str, story_id, all_data)
+        user_id = int(user_id_str)
+        actual_owner_id = get_owner_id_or_raise(user_id, story_id, story_data)
     except PermissionError as e:
         logger.warning(str(e))
         await query.edit_message_text("У вас нет прав для редактирования этой истории.")
         return ConversationHandler.END
 
-    # Подменим user_id в context на владельца, чтобы корректно сохранить позже
+    # Подменим user_id в context на владельца
     context.user_data['user_id_str'] = actual_owner_id
 
-    # Получаем саму историю из all_data, чтобы не полагаться на устаревший context.user_data['current_story']
-    story_data = all_data['users_story'][actual_owner_id][story_id]
-    context.user_data['current_story'] = story_data  # Обновим на всякий случай
+    # Убираем использование all_data['users_story'][owner][story_id]
+    # Просто сохраняем уже полученный story_data
+    context.user_data['current_story'] = story_data
 
     # Обработка выбора фрагмента
     if data.startswith(callback_prefix):
@@ -5450,7 +5647,7 @@ async def ask_link_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await show_fragment_actions(update, context, current_fragment_id)
         return ADD_CONTENT
 
-    # Получаем текст из обычного текстового сообщения
+    # Получаем текст кнопки
     button_text = update.message.text if update.message else None
     if not button_text:
         await update.message.reply_text("Текст кнопки не может быть пустым. Попробуйте еще раз:")
@@ -5464,35 +5661,25 @@ async def ask_link_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data['pending_link_button_text'] = button_text
     logger.info(f"Получен текст для кнопки-ссылки: {button_text}")
 
-    # Получаем ID пользователя Telegram
+    # Загружаем историю с учётом совместного редактирования
     user_id_str = str(update.effective_user.id)
     story_id = context.user_data.get('story_id')
-    all_data = load_data()
-    users_story = all_data.get("users_story", {})
 
-    # Определяем владельца истории, учитывая совместное редактирование
-    story_owner_id = None
-    for owner_id, stories in users_story.items():
-        if story_id in stories:
-            story = stories[story_id]
-            coop_editors = story.get("coop_edit", [])
-            if owner_id == user_id_str or user_id_str in coop_editors:
-                story_owner_id = owner_id
-                break
-
-    if story_owner_id is None:
-        await update.message.reply_text("У вас нет доступа к изменениям связей.")
+    if not story_id:
+        await update.message.reply_text("Не удалось определить ID истории.")
         return ConversationHandler.END
 
-    # Устанавливаем корректный user_id_str (владельца)
-    context.user_data['user_id_str'] = story_owner_id
+    story_data = load_user_story(user_id_str, story_id)
 
-    # Обновляем актуальную версию истории из данных
-    context.user_data['current_story'] = copy.deepcopy(users_story[story_owner_id][story_id])
-    story_data = context.user_data['current_story']
-    current_fragment_id = context.user_data['current_fragment_id']
+    if not story_data:
+        await update.message.reply_text("У вас нет доступа к этой истории или она не найдена.")
+        return ConversationHandler.END
 
-    # Получаем все ID фрагментов, КРОМЕ текущего
+    # Обновляем данные в контексте
+    context.user_data['current_story'] = copy.deepcopy(story_data)
+    current_fragment_id = context.user_data.get('current_fragment_id')
+
+    # Получаем все ID фрагментов, кроме текущего
     all_fragment_ids = sorted(story_data.get("fragments", {}).keys())
     targetable_fragment_ids = [f_id for f_id in all_fragment_ids if f_id != current_fragment_id]
 
@@ -5687,9 +5874,7 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
                 await query.edit_message_text("Вы не можете редактировать эту историю.")
                 return None
 
-            all_data = load_data()
-            user_stories = all_data.get("users_story", {}).get(user_id_str, {})
-            story_data = user_stories.get(story_id)
+            story_data = load_user_story(user_id_str, story_id)
 
             if not story_data:
                 await query.edit_message_text("История не найдена.")
@@ -5721,7 +5906,7 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
             legend_too_long = len(legend_text) > 800
             reply_markup = build_fragment_keyboard(user_id_str, story_id, fragment_ids, current_page, story_data, legend_too_long)            
             logger.info(f"legend_text {legend_text}.")             
-            if total_fragments <= 15 and len(legend_text) <= 700:
+            if total_fragments <= 15 and len(legend_text) <= 800:
                 await query.edit_message_text("Создаю схему истории, подождите...")
                 image_path = generate_story_map(story_id, story_data)
 
@@ -6645,7 +6830,7 @@ def generate_branch_map(story_id: str, story_data: dict, branch_name: str, highl
             media_label = ", ".join(type_labels[t] for t in media_types_present)
 
         choices = fragment_content.get("choices", [])
-        has_children_in_rendered_set = any(choice_target in nodes_to_render_ids for choice_target in choices.values())
+        has_children_in_rendered_set = any(choice.get("target") in nodes_to_render_ids for choice in choices)
         is_end_node_for_branch_view = not has_children_in_rendered_set # Конечность в контексте видимых узлов
 
         label_parts = [f"ID: {fragment_id}"]
@@ -6808,7 +6993,7 @@ async def view_public_stories_list(update: Update, context: ContextTypes.DEFAULT
         await update.callback_query.edit_message_text(
             "Публичных историй пока нет.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Главное меню", callback_data="main_menu_start")]
+                [InlineKeyboardButton("Главное меню", callback_data="restart_callback")]
             ])
         )
         return
@@ -6852,9 +7037,7 @@ STORIES_PER_PAGE = 10  # Количество историй на одной с�
 
 async def view_stories_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id_str = str(update.effective_user.id)
-    all_data = load_data()
-    all_stories = all_data.get("users_story", {})
-    user_stories_dict = all_stories.get(user_id_str, {})
+    user_stories_dict = load_all_user_stories(user_id_str)  # заменили ручной доступ
 
     query_data = update.callback_query.data if update.callback_query else ""
     is_neural_mode = "neural_stories_page_" in query_data or query_data == "view_neural_stories"
@@ -6866,11 +7049,9 @@ async def view_stories_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if story_data.get("neural")
         ]
     elif is_coop_mode:
-        story_items = []
-        for uid, stories in all_stories.items():
-            for story_id, story_data in stories.items():
-                if user_id_str in story_data.get("coop_edit", []):
-                    story_items.append((story_id, story_data))
+        coop_stories_dict = load_all_coop_stories_with_user(user_id_str)
+        story_items = list(coop_stories_dict.items())
+
     else:
         story_items = [
             (story_id, story_data) for story_id, story_data in user_stories_dict.items()
@@ -6899,10 +7080,29 @@ async def view_stories_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="restart_callback")])
 
-        return await update.callback_query.edit_message_text(
-            empty_text,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        if update.callback_query:
+            try:
+                await update.callback_query.edit_message_text(
+                    empty_text,
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            except BadRequest as e:
+                print(f"edit_message_text failed: {e}")
+                try:
+                    await update.callback_query.message.delete()
+                except TelegramError as te:
+                    print(f"delete failed: {te}")
+                await update.callback_query.message.reply_text(
+                    empty_text,
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+        elif update.message:
+            await update.message.reply_text(
+                empty_text,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+        return ConversationHandler.END
 
     # Определяем текущую страницу
     current_page = 1
@@ -6925,11 +7125,17 @@ async def view_stories_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         short_title = title[:25] + ("…" if len(title) > 25 else ":")
         play_callback = f"nstartstory_{user_id_str}_{story_id}_main_1"
 
-        keyboard.append([
-            InlineKeyboardButton(f"▶️ {short_title}", callback_data=play_callback),
-            InlineKeyboardButton("✏️ Редакт.", callback_data=f"edit_story_{user_id_str}_{story_id}"),
-            InlineKeyboardButton("❌ Удалить", callback_data=f"delete_story_{user_id_str}_{story_id}")
-        ])
+        if is_coop_mode:
+            keyboard.append([
+                InlineKeyboardButton(f"▶️ {short_title}", callback_data=play_callback),
+                InlineKeyboardButton("✏️ Редакт.", callback_data=f"edit_story_{user_id_str}_{story_id}")
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton(f"▶️ {short_title}", callback_data=play_callback),
+                InlineKeyboardButton("✏️ Редакт.", callback_data=f"edit_story_{user_id_str}_{story_id}"),
+                InlineKeyboardButton("❌ Удалить", callback_data=f"delete_story_{user_id_str}_{story_id}")
+            ])
 
     # Пагинация
     pagination_buttons = []
@@ -6971,11 +7177,12 @@ async def view_stories_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         try:
             await update.callback_query.edit_message_text(message_text, reply_markup=reply_markup)
-        except BadRequest:
+        except BadRequest as e:
+            print(f"edit_message_text failed: {e}")
             try:
                 await update.callback_query.message.delete()
-            except TelegramError:
-                pass
+            except TelegramError as te:
+                print(f"delete failed: {te}")
             await update.callback_query.message.reply_text(message_text, reply_markup=reply_markup)
     elif update.message:
         await update.message.reply_text(message_text, reply_markup=reply_markup)
@@ -7039,7 +7246,8 @@ async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"user_id_str {user_id_str}.") 
     context.user_data['delete_candidate'] = (user_id_str, story_id)
 
-    story_title = load_data().get("users_story", {}).get(user_id_str, {}).get(story_id, {}).get("title", "Без названия")
+    story_data = load_user_story(user_id_str, story_id)
+    story_title = story_data.get("title", "Без названия")
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -7053,7 +7261,6 @@ async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=keyboard,
         parse_mode='Markdown'
     )
-
 
 
 
@@ -7112,18 +7319,13 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data.pop(f"auto_path_{user_id}_{story_id_from_data}_{chat_id}", None)
 
-    all_data = load_data()  # Убедитесь, что это эффективно
-
-    story_data_found: Optional[Dict[str, Any]] = None
-    story_owner_id: Optional[str] = None
-
-    # Поиск story_data и владельца истории
-    for uid, user_stories_map in all_data.get("users_story", {}).items():
-        if story_id_from_data in user_stories_map:
-            story_data_found = user_stories_map[story_id_from_data]
-            story_owner_id = uid
-            break
+    story_data_found = load_user_story(user_id, story_id_from_data)
     
+
+    story_owner_id = get_owner_id_or_raise(user_id, story_id_from_data, story_data_found)
+
+
+
     if not story_data_found:
         await context.bot.send_message(chat_id=message.chat.id, text="История не найдена.")
         return
@@ -7271,9 +7473,8 @@ async def render_fragment(
                     
                     # Сохраняем данные и пытаемся их перезагрузить для актуальности
                     save_story_data(str(owner_id), story_id, story_data)
-                    new_data = load_data() # load_data должна вернуть актуальные данные
-                    user_stories = new_data.get("users_story", {}).get(str(owner_id), {})
-                    new_story_data_local = user_stories.get(story_id)
+                    new_story_data_local = load_user_story(owner_id, story_id) # load_data должна вернуть актуальные данные
+
 
                     if not new_story_data_local:
                         logger.error(f"Ошибка: не удалось загрузить сгенерированный фрагмент для пользователя {owner_id}, история {story_id}.")
@@ -8082,8 +8283,8 @@ async def generate_gemini_response(query, full_story, current_fragment):
 
 
 async def generate_gemini_fragment(user_id, story_id, fragment_id):
-    all_data = load_data()
-    story = all_data["users_story"].get(str(user_id), {}).get(story_id)
+
+    story = load_user_story(user_id, story_id)
 
     if not story:
         return "История не найдена."
