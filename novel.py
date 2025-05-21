@@ -213,6 +213,42 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         return ADMIN_UPLOAD
 
 
+def load_story_by_id_fallback(story_id: str) -> dict:
+    """
+    Загружает историю по её story_id, даже если пользователь не является её владельцем или coop-редактором.
+    Используется для публичного или fallback-доступа (например, только для чтения).
+    """
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано.")
+            return {}
+
+        all_users_ref = db.reference('users_story')
+        all_stories = all_users_ref.get()
+
+        if not all_stories or not isinstance(all_stories, dict):
+            logger.warning("Не удалось загрузить список всех историй пользователей.")
+            return {}
+
+        for user_id, stories in all_stories.items():
+            if not isinstance(stories, dict):
+                continue
+            story_data = stories.get(story_id)
+            if story_data:
+                logger.info(f"История {story_id} найдена у пользователя {user_id} через fallback-доступ.")
+                return story_data
+
+        logger.info(f"История {story_id} не найдена ни у одного пользователя.")
+        return {}
+
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при fallback-загрузке истории {story_id}: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при fallback-загрузке истории {story_id}: {e}")
+        return {}
+
+
 def load_story_settings(inline_message_id: str) -> dict:
     """
     Загружает конкретные настройки истории по ключу inline_message_id из 'story_settings'.
@@ -4320,9 +4356,18 @@ async def handle_neuralstart_story_callback(update: Update, context: ContextType
 
     # Получаем данные из JSON
     story_data = load_user_story(user_id, story_id)
+
+    if not story_data:
+        # Пробуем загрузить через fallback-доступ
+        logging.info(f"Попытка fallback-загрузки истории {story_id} для пользователя {user_id}")
+        story_data = load_story_by_id_fallback(story_id)
+
     if not story_data:
         await query.message.reply_text("⚠️ История не найдена.")
         return
+
+
+
 
 
 
