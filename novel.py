@@ -1129,13 +1129,22 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
             current_fragment_id_fb = story_state_from_firebase.get("current_fragment_id")
             poll_details_fb = story_state_from_firebase["poll_details"]
 
+            votes_raw = poll_details_fb.get("votes", {})
+            if isinstance(votes_raw, list):
+                # допустим, структура [ [choice_idx, [user_id1, user_id2]], ... ]
+                votes_dict = {int(choice_idx): set(user_ids) for choice_idx, user_ids in votes_raw}
+            elif isinstance(votes_raw, dict):
+                votes_dict = {int(k): set(v) for k, v in votes_raw.items()}
+            else:
+                votes_dict = {}
+            
             rehydrated_poll_data = {
                 "type": "poll",
                 "target_user_id": story_state_from_firebase["target_user_id"],
                 "story_id": story_state_from_firebase["story_id"],
                 "current_fragment_id": current_fragment_id_fb,
                 "choices_data": poll_details_fb.get("choices_data", []),
-                "votes": {int(k): v_set for k, v_set in poll_details_fb.get("votes", {}).items()},  # Приводим ключи к int
+                "votes": votes_dict,  # Приводим ключи к int
                 "voted_users": poll_details_fb.get("voted_users", set()),
                 "required_votes_to_win": story_state_from_firebase["required_votes_to_win"]
             }
