@@ -1129,12 +1129,12 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
             current_fragment_id_fb = story_state_from_firebase.get("current_fragment_id")
             poll_details_fb = story_state_from_firebase["poll_details"]
 
-            votes_raw = poll_details_fb.get("votes", {})
+            votes_raw = poll_details_fb.get("votes", [])
             if isinstance(votes_raw, list):
-                # допустим, структура [ [choice_idx, [user_id1, user_id2]], ... ]
-                votes_dict = {int(choice_idx): set(user_ids) for choice_idx, user_ids in votes_raw}
-            elif isinstance(votes_raw, dict):
-                votes_dict = {int(k): set(v) for k, v in votes_raw.items()}
+                votes_dict = {
+                    idx: set(user_ids if isinstance(user_ids, list) else [user_ids])
+                    for idx, user_ids in enumerate(votes_raw)
+                }
             else:
                 votes_dict = {}
             
