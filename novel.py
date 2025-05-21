@@ -475,7 +475,25 @@ def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Попытка сохранить текущую историю из контекста, но не все данные найдены в context.user_data (user_id_str, story_id, current_story).")
 
 
+def get_owner_id(story_id: str, story_data: dict) -> str:
+    """
+    Возвращает user_id владельца истории (строкой), без проверки прав доступа.
+    Если story_id == "000", возвращает "000" как владельца.
+    """
+    if story_id == "000":
+        return "000"
 
+    if not story_data or not isinstance(story_data, dict):
+        raise ValueError(f"История {story_id} не найдена или повреждена.")
+
+    owner_id_raw = story_data.get("owner_id")
+    if owner_id_raw is None:
+        raise ValueError(f"История {story_id} не содержит информации о владельце.")
+
+    try:
+        return str(int(owner_id_raw))
+    except ValueError:
+        raise ValueError(f"owner_id имеет неверный формат: {owner_id_raw}")
 
 
 def get_owner_id_or_raise(user_id: int, story_id: str, story_data: dict) -> str:
@@ -7374,15 +7392,13 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.pop(f"auto_path_{user_id}_{story_id_from_data}_{chat_id}", None)
 
     story_data_found = load_user_story(user_id, story_id_from_data)
-    
-
-    story_owner_id = get_owner_id_or_raise(user_id, story_id_from_data, story_data_found)
-
-
+    if not story_data_found:
+        story_data_found = load_story_by_id_fallback(story_id_from_data)
 
     if not story_data_found:
-        await context.bot.send_message(chat_id=message.chat.id, text="История не найдена.")
-        return
+        logging.info(f"История {story_id_from_data} не найдена даже через fallback.")  
+
+    story_owner_id = get_owner_id(story_id_from_data, story_data_found)
 
     fragments = story_data_found.setdefault("fragments", {})
     fragment_data = fragments.get(fragment_id)
