@@ -13,9 +13,10 @@ from telegram import (
     InputTextMessageContent,
     Message,
     Update,
+    CallbackQuery,    
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, Forbidden, TelegramError, TimedOut
+from telegram.error import BadRequest, Forbidden, TelegramError, TimedOut 
 from telegram.ext import (
     Application,
     CallbackContext,
@@ -45,9 +46,11 @@ import time
 from asyncio import create_task, sleep
 from collections import defaultdict
 from datetime import datetime
+from datetime import timezone, timedelta
+import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
 from uuid import uuid4
 
@@ -134,6 +137,61 @@ MEDIA_TYPES = {"photo", "video", "animation", "audio"}
 
 
 
+# Замените на ваш ID администратора
+ADMIN_USER_ID = 6217936347
+logger = logging.getLogger(__name__)
+
+async def delete_inline_stories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("У вас нет прав на выполнение этой команды.")
+        return
+
+    try:
+        ref = db.reference('story_settings')
+        all_stories = ref.get()
+
+        if not all_stories:
+            await update.message.reply_text("Нет активных историй для удаления.")
+            return
+
+        now = datetime.datetime.now(timezone.utc)
+        deleted_count = 0
+
+        for inline_message_id, story_data in all_stories.items():
+            launch_info = story_data.get("launch_time")
+            
+            # Удаляем истории без ключа launch_time или без iso_timestamp_utc
+            if not launch_info or "iso_timestamp_utc" not in launch_info:
+                logger.info(f"Удаление истории {inline_message_id}: отсутствует launch_time или iso_timestamp_utc")
+                db.reference(f'story_settings/{inline_message_id}').delete()
+                deleted_count += 1
+                continue
+
+            # Пытаемся разобрать timestamp
+            timestamp_str = launch_info.get("iso_timestamp_utc")
+            try:
+                launch_time = datetime.datetime.fromisoformat(timestamp_str)
+                if launch_time.tzinfo is None:
+                    launch_time = launch_time.replace(tzinfo=timezone.utc)
+            except Exception as e:
+                logger.warning(f"Некорректный формат времени для {inline_message_id}: {e}, запись будет удалена.")
+                db.reference(f'story_settings/{inline_message_id}').delete()
+                deleted_count += 1
+                continue
+
+            # Проверяем, устарела ли история
+            if now - launch_time >= timedelta(weeks=2):
+                logger.info(f"Удаление истории {inline_message_id}, дата запуска: {timestamp_str}")
+                db.reference(f'story_settings/{inline_message_id}').delete()
+                deleted_count += 1
+
+        await update.message.reply_text(f"Удалено устаревших или некорректных историй: {deleted_count}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при удалении историй: {e}")
+        await update.message.reply_text("Произошла ошибка при удалении.")
+
+
 async def admin_upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Пожалуйста, отправьте JSON-файл для загрузки в Firebase.")
     return ADMIN_UPLOAD
@@ -211,42 +269,6 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         await update.message.reply_text(f"Ошибка при обработке: {e}")
         return ADMIN_UPLOAD
-
-
-def load_story_by_id_fallback(story_id: str) -> dict:
-    """
-    Загружает историю по её story_id, даже если пользователь не является её владельцем или coop-редактором.
-    Используется для публичного или fallback-доступа (например, только для чтения).
-    """
-    try:
-        if not firebase_admin._DEFAULT_APP_NAME:
-            logger.error("Firebase приложение не инициализировано.")
-            return {}
-
-        all_users_ref = db.reference('users_story')
-        all_stories = all_users_ref.get()
-
-        if not all_stories or not isinstance(all_stories, dict):
-            logger.warning("Не удалось загрузить список всех историй пользователей.")
-            return {}
-
-        for user_id, stories in all_stories.items():
-            if not isinstance(stories, dict):
-                continue
-            story_data = stories.get(story_id)
-            if story_data:
-                logger.info(f"История {story_id} найдена у пользователя {user_id} через fallback-доступ.")
-                return story_data
-
-        logger.info(f"История {story_id} не найдена ни у одного пользователя.")
-        return {}
-
-    except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при fallback-загрузке истории {story_id}: {e}")
-        return {}
-    except Exception as e:
-        logger.error(f"Неожиданная ошибка при fallback-загрузке истории {story_id}: {e}")
-        return {}
 
 
 def load_story_settings(inline_message_id: str) -> dict:
@@ -336,6 +358,43 @@ def load_all_coop_stories_with_user(user_id_str: str) -> dict:
         return {}
     except Exception as e:
         logger.error(f"Неожиданная ошибка при загрузке coop-историй: {e}")
+        return {}
+
+
+def load_story_by_id_fallback(story_id: str) -> dict:
+    """
+    Загружает историю по её story_id, даже если пользователь не является её владельцем или coop-редактором.
+    Используется для публичного или fallback-доступа (например, только для чтения).
+    """
+    logger.info(f"История {story_id}.")    
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано.")
+            return {}
+
+        all_users_ref = db.reference('users_story')
+        all_stories = all_users_ref.get()
+
+        if not all_stories or not isinstance(all_stories, dict):
+            logger.warning("Не удалось загрузить список всех историй пользователей.")
+            return {}
+
+        for user_id, stories in all_stories.items():
+            if not isinstance(stories, dict):
+                continue
+            story_data = stories.get(story_id)
+            if story_data:
+                logger.info(f"История {story_id} найдена у пользователя {user_id} через fallback-доступ.")
+                return story_data
+
+        logger.info(f"История {story_id} не найдена ни у одного пользователя.")
+        return {}
+
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при fallback-загрузке истории {story_id}: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при fallback-загрузке истории {story_id}: {e}")
         return {}
 
 
@@ -475,25 +534,7 @@ def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Попытка сохранить текущую историю из контекста, но не все данные найдены в context.user_data (user_id_str, story_id, current_story).")
 
 
-def get_owner_id(story_id: str, story_data: dict) -> str:
-    """
-    Возвращает user_id владельца истории (строкой), без проверки прав доступа.
-    Если story_id == "000", возвращает "000" как владельца.
-    """
-    if story_id == "000":
-        return "000"
 
-    if not story_data or not isinstance(story_data, dict):
-        raise ValueError(f"История {story_id} не найдена или повреждена.")
-
-    owner_id_raw = story_data.get("owner_id")
-    if owner_id_raw is None:
-        raise ValueError(f"История {story_id} не содержит информации о владельце.")
-
-    try:
-        return str(int(owner_id_raw))
-    except ValueError:
-        raise ValueError(f"owner_id имеет неверный формат: {owner_id_raw}")
 
 
 def get_owner_id_or_raise(user_id: int, story_id: str, story_data: dict) -> str:
@@ -528,6 +569,27 @@ def get_owner_id_or_raise(user_id: int, story_id: str, story_data: dict) -> str:
 
     raise PermissionError(f"Пользователь {user_id} не имеет доступа к истории {story_id}")
 
+
+
+def get_owner_id(story_id: str, story_data: dict) -> str:
+    """
+    Возвращает user_id владельца истории (строкой), без проверки прав доступа.
+    Если story_id == "000", возвращает "000" как владельца.
+    """
+    if story_id == "000":
+        return "000"
+
+    if not story_data or not isinstance(story_data, dict):
+        raise ValueError(f"История {story_id} не найдена или повреждена.")
+
+    owner_id_raw = story_data.get("owner_id")
+    if owner_id_raw is None:
+        raise ValueError(f"История {story_id} не содержит информации о владельце.")
+
+    try:
+        return str(int(owner_id_raw))
+    except ValueError:
+        raise ValueError(f"owner_id имеет неверный формат: {owner_id_raw}")
 
 
 async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -590,6 +652,7 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
     
     # Получаем существующие данные, чтобы не перезаписать launch_time если оно уже есть
     existing_data = ref.get() or {}
+    existing_data.update(story_state_data)
     
     if 'launch_time' not in existing_data and 'launch_time' not in story_state_data :
         now_utc = datetime.datetime.utcnow()
@@ -618,6 +681,23 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
 
     logger.info(f"Saving to Firebase for {inline_message_id}: {story_state_data}")
     ref.set(story_state_data)
+
+def update_user_attributes(inline_message_id: str, user_attributes: dict):
+    """
+    Обновляет только поле 'user_attributes' в story_settings/{inline_message_id}, 
+    не затрагивая другие поля.
+    """
+    if not inline_message_id:
+        logger.error("update_user_attributes: inline_message_id is required.")
+        return
+
+    ref = db.reference(f'story_settings/{inline_message_id}/user_attributes')
+    
+    try:
+        logger.info(f"Updating user_attributes for {inline_message_id}: {user_attributes}")
+        ref.set(user_attributes)
+    except Exception as e:
+        logger.error(f"Failed to update user_attributes for {inline_message_id}: {e}")
 
 def save_story_data_to_file(all_data: dict) -> bool:
     """
@@ -687,8 +767,131 @@ from telegram.ext import CallbackContext
 
 
 
+def check_choice_requirements(effects: list, user_attributes: dict) -> list[str]:
+    errors = []
+
+    for effect in effects:
+        stat = effect.get("stat")
+        value = effect.get("value")
+        effect_type, op, number = _parse_effect_value(value)
+
+        if effect_type == "check":
+            if stat not in user_attributes:
+                errors.append(f"{stat}: отсутствует")
+                continue
+
+            current_value = user_attributes[stat]
+
+            if op == ">" and not (current_value > number):
+                errors.append(f"{stat}: требуется > {number}, текущее значение {current_value}")
+            elif op == "<" and not (current_value < number):
+                errors.append(f"{stat}: требуется < {number}, текущее значение {current_value}")
+            elif op == "=" and not (current_value == number):
+                errors.append(f"{stat}: требуется = {number}, текущее значение {current_value}")
+
+    return errors
 
 
+async def process_choice_effects_to_user_attributes(
+    inline_message_id: str,
+    user_id: int,
+    effects_list: List[Dict[str, Any]],
+    query: Optional[CallbackQuery] = None,
+    context: Optional[CallbackContext] = None
+) -> Tuple[bool, str, bool, Dict[str, Any]]:
+    """
+    Возвращает: (proceed, alert_text, needs_retry, story_state)
+    """
+    story_state = load_story_state_from_firebase(inline_message_id)
+    user_attr = story_state.get("user_attributes", {})
+    temp_user_attr = dict(user_attr)
+
+    success_alert_parts = []
+    
+    # Разделяем эффекты на модификации и проверки
+    modifications = [e for e in effects_list if _parse_effect_value(e.get("value", ""))[0] in ["set", "modify"]]
+    checks = [e for e in effects_list if _parse_effect_value(e.get("value", ""))[0] == "check"]
+
+    # 1. Применяем все модификации атрибутов
+    if modifications:
+        for effect in modifications:
+            stat_name = effect.get("stat")
+            value_str = effect.get("value", "")
+            hide_effect = effect.get("hide", False)
+            action_type, op_char, numeric_val = _parse_effect_value(value_str)
+
+            if action_type == "invalid" or not stat_name or numeric_val is None:
+                logger.warning(f"Пропуск некорректного модифицирующего эффекта: {effect}")
+                continue
+            
+            current_value = temp_user_attr.get(stat_name)
+
+            if action_type == "set":
+                temp_user_attr[stat_name] = numeric_val
+                if not hide_effect:
+                    success_alert_parts.append(f"▫️Вы получили атрибут {stat_name}: {numeric_val}")
+            
+            elif action_type == "modify":
+                base_val = 0
+                try:
+                    base_val = int(current_value)
+                except (ValueError, TypeError):
+                    logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_value}'. Используется 0.")
+                
+                new_val = base_val + numeric_val if op_char == '+' else base_val - numeric_val
+                temp_user_attr[stat_name] = new_val
+                if not hide_effect:
+                    word = "увеличен" if op_char == '+' else "уменьшен"
+                    success_alert_parts.append(f"▫️Атрибут {stat_name} {word} на {abs(numeric_val)}")
+
+        # Сохраняем измененные атрибуты до выполнения проверок
+        story_state["user_attributes"] = temp_user_attr
+        save_story_state_to_firebase(inline_message_id, story_state)
+        if context and inline_message_id:
+            context.bot_data.setdefault(inline_message_id, {})["user_attributes"] = temp_user_attr
+
+    # 2. Выполняем все проверки
+    failure_reasons = []
+    if checks:
+        for effect in checks:
+            stat_name = effect.get("stat")
+            value_str = effect.get("value", "")
+            action_type, op_char, numeric_val = _parse_effect_value(value_str)
+
+            if action_type == "invalid" or not stat_name or numeric_val is None:
+                logger.warning(f"Пропуск некорректной проверки: {effect}")
+                continue
+
+            current_value = temp_user_attr.get(stat_name)
+            val_for_check = 0
+            try:
+                val_for_check = int(current_value)
+            except (ValueError, TypeError):
+                logger.warning(f"Стат {stat_name} для проверки имеет нечисловое значение '{current_value}'. Проверка с 0.")
+            
+            check_passed = (
+                (op_char == '>' and val_for_check > numeric_val) or
+                (op_char == '<' and val_for_check < numeric_val) or
+                (op_char == '=' and val_for_check == numeric_val)
+            )
+
+            if not check_passed:
+                reason = f"Проверка не пройдена: {stat_name} {op_char}{numeric_val} (у вас: {val_for_check})"
+                if len(reason) > 200: # MAX_ALERT_LENGTH
+                    reason = reason[:197] + "..."
+                failure_reasons.append(reason)
+    
+    # 3. Формируем результат
+    final_alert_text = "\n".join(success_alert_parts)
+    
+    if failure_reasons:
+        failure_alert = "\n".join(failure_reasons)
+        full_alert = f"{final_alert_text}\n\n⚠️ {failure_alert}" if final_alert_text else f"⚠️ {failure_alert}"
+        # Возвращаем флаг needs_retry = True
+        return False, full_alert.strip(), True, story_state
+
+    # Все проверки пройдены успешно
+    return True, final_alert_text.strip(), False, story_state
 
 def clean_caption(text: str) -> str:
     """Удаляет конструкции вида ((+2)) и [[-4]] из текста."""
@@ -699,6 +902,15 @@ def clean_caption(text: str) -> str:
     return cleaned.strip()
 
 
+def replace_attributes_in_text(text: str, user_attributes: dict) -> str:
+    def replace_match(match):
+        key = match.group(1)
+        if key in user_attributes:
+            return f"{key}: {user_attributes[key]}"
+        else:
+            return f"Атрибут ({key}) отсутствует"
+    return re.sub(r"\{\{(.*?)\}\}", replace_match, text)
+
 async def display_fragment_for_interaction(context: CallbackContext, inline_message_id: str, target_user_id_str: str, story_id: str, fragment_id: str):
     logger.info(f"Displaying fragment: inline_msg_id={inline_message_id}, target_user={target_user_id_str}, story={story_id}, fragment={fragment_id}")
     
@@ -708,7 +920,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
         if story_id in user_stories:
             story_definition = user_stories[story_id]
             break
-
+    logger.info(f"context.bot_data ВЫЗОВ: {dict(context.bot_data)}")
     if not story_definition:
         logger.warning(f"История {story_id} не найдена.")
         if inline_message_id:
@@ -730,68 +942,65 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
 
     choices = fragment.get("choices", [])
     raw_caption = fragment.get("text", "")
-    caption = clean_caption(raw_caption)[:1000]
+
     media = fragment.get("media", [])
     keyboard = []
     reply_markup = None
-    
-    required_votes_for_poll = None
-    current_poll_data_from_bot_data = None # Для хранения данных опроса, если они есть в bot_data
 
-    # 1. Проверяем, есть ли данные в context.bot_data (например, только что установленный порог)
+    required_votes_for_poll = None
+    current_poll_data_from_bot_data = None
+    
+    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+
+    # 1. Централизованная загрузка состояния и атрибутов
+    user_attributes = {}
+    story_state_from_firebase = load_story_state_from_firebase(inline_message_id)
+    
+    if story_state_from_firebase:
+        logger.info(f"Loaded state from Firebase for {inline_message_id}")
+        user_attributes = story_state_from_firebase.get("user_attributes", {})
+        
+        # Обновляем story_id и target_user_id из самого надежного источника - Firebase
+        story_id = story_state_from_firebase.get("story_id", story_id)
+        target_user_id_str = story_state_from_firebase.get("target_user_id", target_user_id_str)
+        
+        # Загружаем данные опроса, если они есть
+        required_votes_for_poll = story_state_from_firebase.get("required_votes_to_win")
+        if "poll_details" in story_state_from_firebase and story_state_from_firebase.get("current_fragment_id") == fragment_id:
+            poll_details_fb = story_state_from_firebase["poll_details"]
+            current_poll_data_from_bot_data = {
+                "type": "poll",
+                "target_user_id": story_state_from_firebase["target_user_id"],
+                "story_id": story_state_from_firebase["story_id"],
+                "current_fragment_id": story_state_from_firebase["current_fragment_id"],
+                "choices_data": poll_details_fb.get("choices_data", []),
+                "votes": {int(k): v_set for k, v_set in poll_details_fb.get("votes", {}).items()},
+                "voted_users": poll_details_fb.get("voted_users", set()),
+                "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
+                "user_attributes": user_attributes,
+            }
+            context.bot_data[inline_message_id] = current_poll_data_from_bot_data
+            logger.info(f"Populated context.bot_data with poll state from Firebase for {inline_message_id}")
+
+    # Если мы только что установили порог, он имеет приоритет
     if inline_message_id in context.bot_data:
         bot_data_entry = context.bot_data[inline_message_id]
-        if bot_data_entry.get("type") == "poll_setup_pending_display": # После установки порога
+        if bot_data_entry.get("type") == "poll_setup_pending_display":
             required_votes_for_poll = bot_data_entry.get("required_votes")
             logger.info(f"Using required_votes from poll_setup_pending_display: {required_votes_for_poll}")
-             # Удаляем временный флаг, чтобы он не мешал при следующем вызове (если не будет перезагрузки)
-            # context.bot_data[inline_message_id].pop("type") # Осторожно!
-        elif bot_data_entry.get("type") == "poll": # Уже существующий опрос в памяти
-            current_poll_data_from_bot_data = bot_data_entry
-            required_votes_for_poll = bot_data_entry.get("required_votes_to_win")
-            story_id = bot_data_entry.get("story_id", story_id) # Обновляем, если есть в bot_data
-            target_user_id_str = bot_data_entry.get("target_user_id", target_user_id_str)
-            fragment_id = bot_data_entry.get("current_fragment_id", fragment_id) # Это текущий фрагмент опроса
-            logger.info(f"Using existing poll data from context.bot_data for {inline_message_id}")
+        # Также забираем user_attributes из context.bot_data, если они там свежее (например, после `end_poll_and_proceed`)
+        if "user_attributes" in bot_data_entry:
+             user_attributes = bot_data_entry["user_attributes"]
+             logger.info(f"Overwrote user_attributes from context.bot_data")
 
 
-    # 2. Если нет свежих данных в bot_data, пытаемся загрузить из Firebase
-    if required_votes_for_poll is None and not current_poll_data_from_bot_data:
-        logger.info(f"No fresh data in bot_data for {inline_message_id}, attempting Firebase load.")
-        story_state_from_firebase = load_story_state_from_firebase(inline_message_id)
-        if story_state_from_firebase:
-            logger.info(f"Loaded state from Firebase for {inline_message_id}")
-            # Обновляем переменные из загруженного состояния
-            story_id = story_state_from_firebase.get("story_id", story_id)
-            target_user_id_str = story_state_from_firebase.get("target_user_id", target_user_id_str)
-            # Важно: fragment_id для отображения может отличаться от current_fragment_id в Firebase,
-            # если это переход на новый фрагмент. Но если мы восстанавливаем опрос, то current_fragment_id из Firebase - это он и есть.
-            # Если мы просто отображаем фрагмент (не обязательно с опросом), то переданный fragment_id важнее.
-            # Сейчас логика такая, что display_fragment_for_interaction вызывается с конкретным fragment_id для отображения.
-            # Если в Firebase есть активный опрос для этого fragment_id, то он подхватится.
-            
-            required_votes_for_poll = story_state_from_firebase.get("required_votes_to_win")
-            
-            # Если в Firebase есть детали опроса, загружаем их в context.bot_data
-            if "poll_details" in story_state_from_firebase and story_state_from_firebase.get("current_fragment_id") == fragment_id:
-                poll_details_fb = story_state_from_firebase["poll_details"]
-                current_poll_data_from_bot_data = { # Это станет poll_data для текущей логики
-                    "type": "poll",
-                    "target_user_id": story_state_from_firebase["target_user_id"],
-                    "story_id": story_state_from_firebase["story_id"],
-                    "current_fragment_id": story_state_from_firebase["current_fragment_id"],
-                    "choices_data": poll_details_fb.get("choices_data", []),
-                    "votes": {int(k): v_set for k, v_set in poll_details_fb.get("votes", {}).items()}, # Ключи в int
-                    "voted_users": poll_details_fb.get("voted_users", set()),
-                    "required_votes_to_win": story_state_from_firebase["required_votes_to_win"]
-                }
-                context.bot_data[inline_message_id] = current_poll_data_from_bot_data # Сохраняем в bot_data для этой сессии
-                logger.info(f"Populated context.bot_data with poll state from Firebase for {inline_message_id}")
-            elif required_votes_for_poll is not None: # Порог есть, но деталей опроса нет (или для другого фрагмента)
-                 logger.info(f"Using required_votes from Firebase settings: {required_votes_for_poll}")
-        else:
-            logger.info(f"No state found in Firebase for {inline_message_id}.")
+    # Переименовываем user_attributes_for_check в user_attributes для единообразия
+    user_attributes_for_check = user_attributes
+    logger.info(f"Final user attributes for check: {user_attributes_for_check}")
 
+    raw_caption = replace_attributes_in_text(raw_caption, user_attributes)
+    caption = clean_caption(raw_caption)[:1000]
+    
     if len(choices) > 1 and required_votes_for_poll is None:
         logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: Порог голосов не найден для {inline_message_id} (fragment: {fragment_id}) при попытке отобразить фрагмент с выбором.")
         if inline_message_id:
@@ -802,30 +1011,41 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
         return
     
     # ... (логика с previous_fragment и media остается как есть)
+    logger.info(f"context.bot_data ПЕРЕДОШИБКОЙ: {dict(context.bot_data)}")    
     app_data = context.application.bot_data.setdefault("fragments", {})
     previous_fragment = app_data.get(inline_message_id, {}).get("last_fragment")
+    # 1. Попытка загрузки из context.bot_data
+    user_attributes = context.bot_data.get(inline_message_id, {}).get("user_attributes", {})
+    logger.info(f"********************************************************************************************************************user_attributes {user_attributes} .")
+    # 2. Если пусто и Firebase был загружен — вытаскиваем оттуда
+    if not user_attributes:
+        story_state_from_firebase = load_story_state_from_firebase(inline_message_id)
+        logger.info(f"story_state_from_firebase {story_state_from_firebase} .")        
+        user_attributes = story_state_from_firebase.get("user_attributes", {})
+        logger.info(f"222222222222222222222222222222222222222222222222222222user_attributes {user_attributes} .")        
+        if inline_message_id in context.bot_data:
+            context.bot_data[inline_message_id]["user_attributes"] = user_attributes
+    
     if media and isinstance(media, list): media = media[:1]
     if not media and previous_fragment:
         old_media = previous_fragment.get("media", [])
         if len(old_media) == 1 and old_media[0].get("type") == "photo":
-            media = [{"type": "photo", "file_id": DEFAULT_FILE_ID}]
+            media = [{"type": "photo", "file_id": DEFAULT_FILE_ID}] # Используйте ваш DEFAULT_FILE_ID
     fragment["media"] = media
     app_data.setdefault(inline_message_id, {})
     app_data[inline_message_id]["last_fragment"] = {"id": fragment_id, "media": media}
 
 
-    if len(choices) > 0: # Это блок для голосования
-        if required_votes_for_poll is None: # Доп. проверка
+    if len(choices) > 0:
+        if required_votes_for_poll is None:
             logger.error(f"Попытка создать опрос для {inline_message_id} (fragment: {fragment_id}) без порога.")
             return
 
         poll_data_to_use = None
         if current_poll_data_from_bot_data and current_poll_data_from_bot_data.get("current_fragment_id") == fragment_id:
-            # Используем загруженные или уже существующие в памяти данные опроса
             poll_data_to_use = current_poll_data_from_bot_data
             logger.info(f"Reusing/using loaded poll data for {fragment_id}")
         else:
-            # Создаем новый poll_data, т.к. перешли на новый фрагмент или не было загружено
             logger.info(f"Creating new poll_data for fragment {fragment_id}")
             poll_data_to_use = {
                 "type": "poll",
@@ -835,30 +1055,91 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
                 "choices_data": [],
                 "votes": {idx: set() for idx in range(len(choices))},
                 "voted_users": set(),
-                "required_votes_to_win": required_votes_for_poll
+                "required_votes_to_win": required_votes_for_poll,
+                "user_attributes": user_attributes
             }
-            for idx, choice in enumerate(choices):
+            for idx, choice in enumerate(choices): # Используем оригинальные choices для построения poll_data_to_use
                 text = choice["text"]
                 next_fid = choice["target"]
-                poll_data_to_use["choices_data"].append({"text": text, "next_fragment_id": next_fid})
-            
-            # Сохраняем свежесозданный poll_data в context.bot_data
+                effects = choice.get("effects", [])
+                poll_data_to_use["choices_data"].append({
+                    "text": text,
+                    "next_fragment_id": next_fid,
+                    "effects": effects
+                })
             context.bot_data[inline_message_id] = poll_data_to_use
 
-        # Обновляем клавиатуру на основе poll_data_to_use
         keyboard = []
+        show_vote_counts = required_votes_for_poll > 1
+
+
         for idx, choice_d in enumerate(poll_data_to_use["choices_data"]):
-            num_votes = len(poll_data_to_use["votes"].get(idx, set())) # Убедимся, что idx есть
-            text = choice_d["text"]
-            keyboard.append([InlineKeyboardButton(f"({num_votes}/{required_votes_for_poll}) {text}", callback_data=f"vote_{inline_message_id}_{idx}")])
-        
+            original_text = choice_d["text"]
+            effects_for_choice = choice_d.get("effects", [])
+            is_choice_available = True
+            missing_stats = []
+            must_hide = False
+            alert_info_key_suffix = ""
+
+            for effect in effects_for_choice:
+                effect_value_str = str(effect.get("value", ""))
+                action_type, op, num_req_from_effect = _parse_effect_value(effect_value_str)
+
+                if action_type != "check":
+                    continue
+
+                stat_name = effect.get("stat")
+                if not stat_name or num_req_from_effect is None:
+                    continue
+
+                user_stat_value = user_attributes_for_check.get(stat_name)
+                try:
+                    user_stat_value_num = int(user_stat_value)
+                except (ValueError, TypeError):
+                    user_stat_value_num = None
+
+                check_passed = False
+                if user_stat_value_num is not None:
+                    if op == '>':
+                        check_passed = user_stat_value_num > num_req_from_effect
+                    elif op == '<':
+                        check_passed = user_stat_value_num < num_req_from_effect
+                    elif op == '=':
+                        check_passed = user_stat_value_num == num_req_from_effect
+
+                if not check_passed:
+                    is_choice_available = False
+                    if effect.get("hide", False):
+                        must_hide = True
+                        break  # Прерываем весь выбор, потому что кнопку нужно скрыть
+                    else:
+                        missing_stats.append(stat_name)
+                        alert_info_key_suffix = f"fail_{stat_name}_{op}{num_req_from_effect}_{user_stat_value_num}"
+
+            if must_hide:
+                continue  # Не добавляем кнопку вообще
+
+            # Формируем текст и callback_data
+            button_text_display = original_text
+            if is_choice_available:
+                if show_vote_counts:
+                    num_votes = len(poll_data_to_use["votes"].get(idx, set()))
+                    button_text_display = f"({num_votes}/{required_votes_for_poll}) {original_text}"
+                current_callback_data = f"vote_{inline_message_id}_{idx}"
+            else:
+                if missing_stats:
+                    button_text_display = f"{original_text} (не хватает: {', '.join(missing_stats)})"
+                else:
+                    button_text_display = f"[НЕДОСТУПНО] {original_text}"
+                current_callback_data = f"vote_{inline_message_id}_{idx}"  # Все равно обрабатываем как голосование
+
+            keyboard.append([InlineKeyboardButton(button_text_display, callback_data=current_callback_data)])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
-        caption += f"\n\n🗳️ Голосуйте! Нужно {required_votes_for_poll} голосов для выбора."
+
+        if show_vote_counts:
+            caption += f"\n\n🗳️ Идёт голосование. Нужно {required_votes_for_poll} голосов для выбора."
         
-        # Сохраняем состояние в Firebase ПОСЛЕ того как poll_data_to_use сформирован
-        # Это включает начальные настройки или восстановленное состояние
-        # Launch_time уже должен быть установлен, если это не первый вызов.
-        # save_story_state_to_firebase позаботится о launch_time.
         
         # Формируем данные для сохранения, включая poll_details
         firebase_save_data = {
@@ -866,55 +1147,60 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             "target_user_id": poll_data_to_use["target_user_id"],
             "current_fragment_id": poll_data_to_use["current_fragment_id"],
             "required_votes_to_win": poll_data_to_use["required_votes_to_win"],
-            "poll_details": { # Явно указываем poll_details
-                "choices_data": poll_data_to_use["choices_data"],
-                # Конвертация для Firebase произойдет внутри save_story_state_to_firebase
+            "poll_details": {
+                "choices_data": poll_data_to_use["choices_data"], # Включая полные effects
                 "votes": poll_data_to_use["votes"], 
-                "voted_users": poll_data_to_use["voted_users"]
-            }
-            # launch_time добавится/сохранится в save_story_state_to_firebase
+                "voted_users": poll_data_to_use["voted_users"],
+            },
+            "user_attributes": user_attributes,
         }
-        save_story_state_to_firebase(inline_message_id, firebase_save_data)
-        logger.info(f"Saved/Updated story state for poll display: {inline_message_id}, fragment: {fragment_id}")
+        logger.info(f"oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooiiiiiiiiiiiiiiiiiiiiiifirebase_save_data: {firebase_save_data}")
 
-    else: # Нет вариантов выбора
-        caption += "\n\n(Продолжение следует автоматически или история завершена)"
-        # Если это конец истории или автоматический переход, можно очистить состояние из Firebase
-        # Но пока неясно, как это определить здесь. Очистка лучше в end_poll_and_proceed или при явном завершении.
-        # Если здесь был активный опрос, но на новом фрагменте его нет, то poll_details в Firebase нужно очистить.
+        save_story_state_to_firebase(inline_message_id, firebase_save_data)
+
+
+    else:  # Нет вариантов выбора
+
+        caption += "\n\n(История завершена)"
         existing_state = load_story_state_from_firebase(inline_message_id)
         if existing_state:
-            if "poll_details" in existing_state: # Если был опрос, а теперь нет
+            if "poll_details" in existing_state:
                 logger.info(f"Fragment {fragment_id} has no choices. Clearing poll_details from Firebase for {inline_message_id}")
-                existing_state.pop("poll_details", None) # Удаляем детали опроса
-                # current_fragment_id обновляется на текущий, без опроса
-                existing_state["current_fragment_id"] = fragment_id 
+                existing_state.pop("poll_details", None)
+                existing_state["current_fragment_id"] = fragment_id
+                save_story_state_to_firebase(inline_message_id, existing_state)
+            elif existing_state.get("current_fragment_id") != fragment_id:
+                existing_state["current_fragment_id"] = fragment_id
                 save_story_state_to_firebase(inline_message_id, existing_state)
 
 
-    # Отправка/редактирование сообщения (без изменений)
     try:
         if media and isinstance(media, list) and media[0].get("file_id"):
             media_item = media[0]
             file_id = media_item.get("file_id")
             media_type = media_item.get("type")
             input_media = None
-            if media_type == "photo": input_media = InputMediaPhoto(media=file_id, caption=caption, parse_mode='HTML')
-            elif media_type == "video": input_media = InputMediaVideo(media=file_id, caption=caption, parse_mode='HTML')
-            elif media_type == "animation": input_media = InputMediaAnimation(media=file_id, caption=caption, parse_mode='HTML')
-            elif media_type == "audio": input_media = InputMediaAudio(media=file_id, caption=caption, parse_mode='HTML')
+            if media_type == "photo":
+                input_media = InputMediaPhoto(media=file_id, caption=caption, parse_mode='HTML')
+            elif media_type == "video":
+                input_media = InputMediaVideo(media=file_id, caption=caption, parse_mode='HTML')
+            elif media_type == "animation":
+                input_media = InputMediaAnimation(media=file_id, caption=caption, parse_mode='HTML')
+            elif media_type == "audio":
+                input_media = InputMediaAudio(media=file_id, caption=caption, parse_mode='HTML')
+            # при необходимости можно добавить еще типы, например InputMediaDocument и т.п.
 
             if input_media:
-                await context.bot.edit_message_media(inline_message_id=inline_message_id, media=input_media, reply_markup=reply_markup)
+                await context.bot.edit_message_media(
+                    inline_message_id=inline_message_id,
+                    media=input_media,
+                    reply_markup=reply_markup
+                )
                 return
         
         await context.bot.edit_message_text(inline_message_id=inline_message_id, text=caption, reply_markup=reply_markup, parse_mode='HTML')
     except Exception as e:
         logger.error(f"Error updating message {inline_message_id}: {e}")
-        # Не очищаем context.bot_data здесь, т.к. данные могут быть важны для Firebase
-        # if inline_message_id in context.bot_data:
-        #     del context.bot_data[inline_message_id] 
-        #     logger.info(f"Cleaned up bot_data for {inline_message_id} due to message edit error.")
 
 
 
@@ -1033,6 +1319,7 @@ async def handle_set_vote_threshold(update: Update, context: CallbackContext):
             # poll_details пока не создаем, они будут созданы в display_fragment_for_interaction
             # если у initial_fragment_id есть варианты выбора.
         }
+        logger.info(f"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppiiiiiiiiiiiiiiiiiiifirebase_save_data: {story_initial_state}")        
         save_story_state_to_firebase(query.inline_message_id, story_initial_state)
         logger.info(f"Vote threshold set and initial state saved for {query.inline_message_id}: {chosen_threshold} votes for story {story_id}, fragment {initial_fragment_id}")
 
@@ -1063,47 +1350,116 @@ async def handle_set_vote_threshold(update: Update, context: CallbackContext):
 
 async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str, winning_choice_idx: int, poll_data: dict):
     logger.info(f"Poll {inline_message_id} ending. Winning index: {winning_choice_idx}")
+    
+    target_user_id = poll_data["target_user_id"]
+    story_id = poll_data["story_id"]
+    # ⚠️ Важно получить ID текущего фрагмента для возможного повтора
+    current_fragment_id = poll_data.get("current_fragment_id") 
+    
+    # Очищаем данные опроса из оперативной памяти
+    context.bot_data.pop(inline_message_id, None)
 
     choices_data = poll_data["choices_data"]
-    target_user_id = poll_data["target_user_id"] 
-    story_id = poll_data["story_id"]      
-    
-    # Удаляем данные текущего опроса из context.bot_data (в памяти)
-    # Firebase будет обновлен/очищен в display_fragment_for_interaction или при завершении
-    context.bot_data.pop(inline_message_id, None) 
-
     next_fragment_id_to_display = choices_data[winning_choice_idx]["next_fragment_id"]
     winner_text_choice = choices_data[winning_choice_idx]['text']
     num_votes_for_winner = len(poll_data["votes"].get(winning_choice_idx, set()))
+    required_votes_to_win = poll_data.get("required_votes_to_win", 1)
+    
+    winning_effects = choices_data[winning_choice_idx].get("effects", [])
+    alert_text = ""
+    proceed = True
+    needs_retry = False
+    story_state = None # Инициализируем story_state
 
-    winner_message_text = f"Голосование завершено!\nВыбран вариант: \"{winner_text_choice}\" ({num_votes_for_winner} голосов)."
+    if winning_effects:
+        try:
+            proceed, alert_text, needs_retry, story_state = await process_choice_effects_to_user_attributes(
+                inline_message_id=inline_message_id,
+                user_id=int(target_user_id),
+                effects_list=winning_effects,
+                context=context
+            )
+            if story_state and "user_attributes" in story_state:
+                context.bot_data.setdefault(inline_message_id, {})["user_attributes"] = story_state["user_attributes"]
+        except Exception as e:
+            logger.error(f"Error applying effects for {inline_message_id}: {e}", exc_info=True)
+            alert_text = "Произошла внутренняя ошибка при применении эффектов."
+            proceed = False
+            needs_retry = False # В случае ошибки кода не повторяем
 
+    winner_message_text = f"Голосование завершено!\nВыбран вариант: \"{winner_text_choice}\""
+    if required_votes_to_win > 1:
+        winner_message_text += f" ({num_votes_for_winner} голосов)."
+    if alert_text:
+        winner_message_text += f"\n\n{alert_text}"
+
+    # ⛔ Если проверка провалена и нужен повтор
+    if not proceed and needs_retry:
+        logger.info(f"Effects check failed — will retry fragment {current_fragment_id} after a delay.")
+        try:
+            # Важно: Очищаем poll_details из состояния, чтобы при повторе голосование началось заново!
+            if story_state:
+                story_state.pop("poll_details", None)
+                save_story_state_to_firebase(inline_message_id, story_state)
+
+            delay_seconds = 10
+            winner_message_text += f"\n\n<i>Продолжение через {delay_seconds} секунд...</i>"
+            await context.bot.edit_message_text(
+                inline_message_id=inline_message_id, 
+                text=winner_message_text, 
+                reply_markup=None,
+                parse_mode='HTML'
+            )
+            await asyncio.sleep(delay_seconds)  # Даем пользователю прочитать сообщение
+            # Отображаем тот же фрагмент для повторной попытки
+            await display_fragment_for_interaction(
+                context, inline_message_id, str(target_user_id), story_id, current_fragment_id
+            )
+        except Exception as e:
+            logger.error(f"Error while retrying fragment: {e}")
+        return # Завершаем выполнение функции
+
+    # Если все прошло успешно или повтор не требуется
+    logger.info("Poll succeeded, clearing poll details and proceeding to next fragment.")
+    
+    # Загружаем последнее состояние, если оно еще не было загружено
+    if not story_state:
+        story_state = load_story_state_from_firebase(inline_message_id)
+
+    if story_state:
+        # Очищаем данные завершенного опроса из состояния перед сохранением
+        story_state.pop("poll_details", None)
+        # Устанавливаем ID нового фрагмента
+        story_state["current_fragment_id"] = next_fragment_id_to_display
+        # Сохраняем чистое состояние в Firebase
+        save_story_state_to_firebase(inline_message_id, story_state)
+
+    # ✅ Если всё успешно, или неудача без повтора
     try:
-        await context.bot.edit_message_text(inline_message_id=inline_message_id, text=winner_message_text, reply_markup=None)
-        await asyncio.sleep(3) 
+        # Показываем финальное сообщение о результате голосования
+        if required_votes_to_win > 1 or winning_effects:
+            delay_seconds = 5
+            winner_message_text += f"\n\n<i>Продолжение через {delay_seconds} секунд...</i>"
+            await context.bot.edit_message_text(
+                inline_message_id=inline_message_id, 
+                text=winner_message_text, 
+                reply_markup=None,
+                parse_mode='HTML'
+            )
+            await asyncio.sleep(delay_seconds)
     except Exception as e:
         logger.error(f"Error showing poll result for {inline_message_id}: {e}")
-
-    if next_fragment_id_to_display:
-        # display_fragment_for_interaction позаботится о сохранении нового состояния в Firebase
-        # (либо новый опрос, либо просто фрагмент без опроса, тогда poll_details очистятся)
+        
+    if proceed and next_fragment_id_to_display:
         await display_fragment_for_interaction(context, inline_message_id, target_user_id, story_id, next_fragment_id_to_display)
-    else: 
+    elif proceed:
         logger.info(f"No next fragment to display after poll for {inline_message_id}. Story might be ending.")
-        final_text = winner_message_text + "\n\nИстория завершена или следующий шаг не определен."
+        final_text = winner_message_text + "\n\nИстория завершена."
         try:
             await context.bot.edit_message_text(inline_message_id=inline_message_id, text=final_text, reply_markup=None)
-            
-            # Удаляем всю запись о story_settings из Firebase, так как история завершена
-            ref = db.reference(f'story_settings/{inline_message_id}') # Замените db.reference
-            ref.delete()
-            logger.info(f"Removed story_settings from Firebase for completed inline session {inline_message_id}")
-
+            db.reference(f'story_settings/{inline_message_id}').delete()
         except Exception as e:
-            logger.error(f"Error updating message or deleting Firebase data when no next fragment: {e}")
-
-
-
+            logger.error(f"Error finalizing story: {e}")
 
 async def handle_poll_vote(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -1132,7 +1488,7 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
         user_id = query.from_user.id
 
         poll_data = context.bot_data.get(query.inline_message_id)
-
+        logger.info(f"poll_data {poll_data}.")
         # Если нет в памяти, пытаемся загрузить из Firebase
         if not poll_data or poll_data.get("type") != "poll":
             logger.info(f"Poll data for {query.inline_message_id} not in memory or invalid type. Attempting Firebase load.")
@@ -1164,7 +1520,8 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
                 "choices_data": poll_details_fb.get("choices_data", []),
                 "votes": votes_dict,  # Приводим ключи к int
                 "voted_users": poll_details_fb.get("voted_users", set()),
-                "required_votes_to_win": story_state_from_firebase["required_votes_to_win"]
+                "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
+                "user_attributes":story_state_from_firebase["user_attributes"],
             }
 
             # Убедимся, что fragment тот же, только теперь с новым poll_data
@@ -1206,9 +1563,13 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
                 "choices_data": poll_data["choices_data"],
                 "votes": poll_data["votes"], # Будет сконвертировано в save_story_state_to_firebase
                 "voted_users": poll_data["voted_users"] # Будет сконвертировано
-            }
+            },
+            "user_attributes":poll_data["user_attributes"],
             # launch_time будет сохранено из существующего значения в Firebase
         }
+        logger.info(f"iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiifirebase_save_data: {firebase_save_data}")        
+
+
         save_story_state_to_firebase(query.inline_message_id, firebase_save_data)
         logger.info(f"Vote cast and state saved for {query.inline_message_id}, choice {choice_idx}")
 
@@ -1240,7 +1601,6 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
         if query and hasattr(query, 'answer') and not query.answered:
             try: await query.answer("Ошибка при голосовании.")
             except Exception: pass
-
 
 
 def is_possible_story_id(text: str) -> bool:
@@ -1607,7 +1967,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if story_data:
             if story_data.get("fragments"):
-                first_fragment_id = next(iter(story_data["fragments"]), None)
+                if "main_1" in story_data["fragments"]:
+                    first_fragment_id = "main_1"
+                else:
+                    first_fragment_id = next(iter(story_data["fragments"]), None)
                 if first_fragment_id:
                     context.user_data.clear()
 
@@ -2526,7 +2889,7 @@ def build_branch_fragments_keyboard(
     keyboard.append([InlineKeyboardButton("◀️ К списку веток", callback_data=f"show_branches_{user_id_str}_{story_id}_1")])
     # Опционально: Назад к общему редактированию истории (edit_story_ ожидает user_id, story_id)
     # keyboard.append([InlineKeyboardButton("⏪ К редактированию истории", callback_data=f"edit_story_unused_{user_id_str}_{story_id}")]) # edit_story_ ожидает callback 'edit_story_action_user_story'
-    keyboard.append([InlineKeyboardButton("🌃В Главное Меню🌃", callback_data='main_menu_start')]) # Или restart_callback
+    keyboard.append([InlineKeyboardButton("🌃В Главное Меню🌃", callback_data='restart_callback')]) # Или restart_callback
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -3045,6 +3408,73 @@ id истории — вы можете использовать его для �
             [InlineKeyboardButton("❌ Закрыть", callback_data="delete_this_message")]
         ])
     )
+
+
+
+
+
+
+
+async def linkhelp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
+
+    """Обработчик помощи, вызываемый через /help или кнопку."""
+    if update.message:
+        # Вызов через команду /help
+        target = update.message
+    elif update.callback_query:
+        # Вызов через нажатие кнопки
+        query = update.callback_query
+        await query.answer()
+        target = query.message
+    else:
+        return
+
+    help_text = """
+▶️Если вместо текста вы отправите число от 0.1 до 90000, то в таком случае кнопки у <u>текущего</u> фрагмента не будет, вместо этого он переключится дальше автоматически через время равное заданному числу в секундах. 
+
+▶️Кроме того в двойных фигурных скобках формата <code>{{фраза:значение}}</code> вы можете указать различные атрибуты истории, такие как харакстеристики персонажа, наличие предмета и прочие меняющиеся в ходе истории данные.
+Возможные знаки:
+"+", "-", "=", "&lt;", "&gt;"
+
+<b>Примеры:</b>
+🔸<code>Взять книгу{{книга}}</code> - Создаёт кнопку "Взять книгу" и задаёт ей атрибут "книга" на значение по-умолчанию (поскольку ничего не указано после фразы). Это всегда единица если не указано иного. То есть <code>{{книга:1}}</code> - ровно то же самое
+🔸<code>Выпить зелье{{Сила:4}}</code> - Создаёт кнопку "Выпить зелье" и задаёт ей атрибут "Сила" на значение 4(удаляя любое прошлое значение если оно было или как-то формировалось до этого в истории)
+🔸<code>Накинуть капюшон{{Подозрения стражи:+3}}</code> - Создаёт кнопку "Накинуть капюшон" и меняет атрибут "Подозрения стражи" на +3 относительно прошлого значения. Если прошлого значения не было, то используется значение по-умолчанию - ноль. То есть значение становится 3.
+🔸<code>Прочитать надпись{{Интеллект:>3}}</code> - Создаёт кнопку "Прочитать надпись" и проверяет соотвествие атрибута "Интеллект" для данной кнопки. Если оно не больше 3х, то бот не даст нажать на кнопку к которой этот атрибут относится выдав пользователю сообщение о том что ему не хватает значения атрибута
+▶️Если вы укажете несколько проверок на одну кнопку, то пользователь должен пройти все из них чтобы нажать на кнопку. 
+
+▶️Для любой кнопки вы можете задать несколько проверок или изменений. Проверки или изменения осуществляются в указанном вами порядке. Вы можете указать каждый атрибут и/или проверку в отдельных двойных фигурных скобках, а можете перечислить через запятую в рамках одной конструкции.
+<b>Примеры:</b>
+🔸<code>Поспорить{{Интеллект:>5}}{{Риторика:>7}}{{Знания:+3}}</code> - Создаёт кнопку  "Поспорить", которая проверяет сначала соответствие интеллекту, затем риторике, затем в случае успеха меняет значение "знаний" увеличивая их на 3
+🔸<code>Начать историю{{Интеллект:4, Сила:5, Магия:3, ловкость:6}}</code> - Задаёт перечнь начальных характеристик которые в дальнейшем можно менять по ходу истории. Уместно так делать в самом начале
+
+▶️Если атрибутов несколько то они будут применяться именно в той последовательности в какой вы их прпишите
+<b>Примеры:</b>
+🔸<code>Попытаться открыть {{Ловкость: +3, Ловкость: >9}}</code> - сначала изменит атрибут "ловкость" на +3 а затем выполнит проверку соответвия. Если проверка неудачна то пользователь сможет нажать ещё раз, но будут учитыываться уже обновлённые значения "ловкости"
+🔸<code>Попытаться открыть {{Ловкость: >9, Ловкость: +3}}</code> - сначала проверит соответвие и прибавит +3 только если проверка будет успешной.
+
+▶️Пользователь будет получать уведомления о меняющихся характеристиках или о том что проверка на один из них не сработала.
+
+
+▶️Если вы не хотите чтобы пользователь получал уведомления, то после числа вы можете написать <code>(hide)</code>, тогда никаких уведомлений пользователь получать не будет. 
+<b>Примеры:</b>
+🔸<code>Молча уйти{{отношение:-5(hide)}}</code> - Создаёт кнопку "Молча уйти" меняющую атрибут отношения на "-5", пользователь при этом не получает никаких уведомлений и не знает о изменениях.
+🔸<code>Прочитать книгу{{Интеллект:>5(hide)}}</code> - Проверяет соответвие требованиям атрибута "Интеллект". Если в данный момент этот атрибут у пользователя 5 или меньше то кнопка даже не появится в перечне кнопок. Если при этом пользователю недоступны все кнопки из-за несоответвия атрибутам, то он получит сообщение "Похоже, на этом ваша история завершилась...но возможно тут были и иные варианты?"
+
+▶️Будьте внимательны и не допускайте ошибки в названиях атрибутов. Например "Использовать" и "Исползовать" - в коде будут разными атрибутами и логика вашей истории из-за этого сломается. Кроме того не забывайте про двоеточие и запятые при указании атрибутов
+
+"""
+    await target.reply_text(
+        help_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
+            [InlineKeyboardButton("❌ Закрыть", callback_data="delete_this_message")]
+        ])
+    )
+
+
+
 
 
 async def mainhelp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
@@ -3817,7 +4247,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             message_text = (
                 f"Схема истории \"{story_data.get('title', story_id)}\".\n"
                 f"id истории: <code>{story_id}</code>.\n"
-                f"<i>(Вы можт скопировать id истории и отправить его другим людям. Им будет достаточно просто отправить этот id боту и ваша история тут же запустится)</i>\n\n"
+                f"<i>(Вы можете скопировать id истории и отправить его другим людям. Им будет достаточно просто отправить этот id боту и ваша история тут же запустится)</i>\n\n"
                 f"Выберите фрагмент для редактирования (Страница {current_page_for_display}/{total_pages if total_pages > 0 else 1}):\n\n" # Добавлена информация о странице в текст
                 f"{legend_text}"
             )
@@ -4028,6 +4458,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 'fragment_id': fragment_id_to_edit
             }
 
+
+
+
+
+
             # Показываем текущее содержимое фрагмента (опционально, но полезно)
             current_text = fragment_data.get("text", "*Нет текста*")
             current_media = fragment_data.get("media", [])
@@ -4042,6 +4477,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id_str = str(update.effective_user.id)
             story_id = context.user_data['story_id']
 
+
+            # ➕ Добавим информацию об эффектах выборов
+            current_choices = fragment_data.get("choices", [])
+            text_lines = []
+            for choice in current_choices:
+                if "effects" in choice:
+                    effect_lines = []
+                    for effect in choice["effects"]:
+                        stat = html.escape(str(effect.get("stat", "неизвестно")))
+                        if effect.get("hide"):
+                            stat = f"{stat}(Скрытый)"
+                        raw_value = str(effect.get("value", "?"))
+                        value = html.escape(raw_value)
+
+                        # Определяем тип эффекта
+                        if re.match(r'^[+-]\d+', raw_value):
+                            verb = "меняет атрибут"
+                        elif re.match(r'^[<>=]', raw_value):
+                            verb = "проверка атрибута"
+                        else:
+                            verb = "задаёт атрибут"
+
+                        effect_lines.append(f"{stat}: {value} ({verb})")
+
+                    if effect_lines:
+                        effects_text = ", ".join(effect_lines)
+                        text_lines.append(
+                            f"\n\n🔸 Выбор <b>«{html.escape(choice.get('text', '...'))}»</b> "
+                            f"ведущий на фрагмент <code>{html.escape(choice.get('target', '???'))}</code> имеет эффект: {effects_text}"
+                        )
+
+            effects_info = "".join(text_lines)
+
+
+
             reply_markup = build_fragment_action_keyboard(
                 fragment_id=fragment_id_to_edit,
                 story_data=story_data,
@@ -4051,9 +4521,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 
+            # Собираем финальный текст
             await query.message.reply_text(
                 f"Редактирование фрагмента: <code>{fragment_id_to_edit}</code>\n"
-                f"Текущий текст: \n✦ ━━━━━━━━━━\n{current_text}\n✦ ━━━━━━━━━━{media_desc}\n\n"
+                f"Текущий текст: \n✦ ━━━━━━━━━━\n{current_text}\n✦ ━━━━━━━━━━{media_desc}"
+                f"{effects_info}\n\n"
                 f"➡️ <b>Отправьте новый текст и/или медиа (фото, видео, gif, аудио) для этого фрагмента.</b>\n"
                 f"Новый контент полностью заменит старый.",
                 reply_markup=reply_markup,
@@ -4089,7 +4561,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not story_data:
                 await query.edit_message_text("История не найдена.")
                 return None
-                
+
             user_id = int(user_id_str)
             owner_id = get_owner_id_or_raise(user_id, story_id, story_data)
 
@@ -4381,7 +4853,7 @@ async def handle_neuralstart_story_callback(update: Update, context: ContextType
     fragment_id = "_".join(parts[2:])
 
 
-    # Получаем данные из JSON
+
     story_data = load_user_story(user_id, story_id)
 
     if not story_data:
@@ -4392,9 +4864,6 @@ async def handle_neuralstart_story_callback(update: Update, context: ContextType
     if not story_data:
         await query.message.reply_text("⚠️ История не найдена.")
         return
-
-
-
 
 
 
@@ -4946,9 +5415,8 @@ async def handle_select_choice_to_edit(update: Update, context: ContextTypes.DEF
     """Обрабатывает выбор кнопки для редактирования и запрашивает новый текст."""
     query = update.callback_query
     await query.answer()
-    data = query.data  # format: edit_choice_select_{index} или edit_choice_cancel
-
-    # Получаем fragment_id из контекста, он должен был быть установлен в handle_edit_choice_start
+    data = query.data
+    logger.info(f"context.user_data: {context.user_data}")
     fragment_id = context.user_data.get('editing_choice_fragment_id')
 
     if not fragment_id:
@@ -4964,9 +5432,8 @@ async def handle_select_choice_to_edit(update: Update, context: ContextTypes.DEF
 
     if data == 'edit_choice_cancel':
         context.user_data.pop('editing_choice_fragment_id', None)
-        # 'editable_choice_keys' уже не используется
         await query.edit_message_text("Редактирование отменено.")
-        await show_fragment_actions(update, context, fragment_id) # fragment_id здесь известен
+        await show_fragment_actions(update, context, fragment_id)
         return ADD_CONTENT
 
     try:
@@ -4977,7 +5444,6 @@ async def handle_select_choice_to_edit(update: Update, context: ContextTypes.DEF
 
         story_data = context.user_data.get('current_story')
         if not story_data:
-            # Эта проверка дублируется, но лучше перестраховаться
             logger.error(f"current_story отсутствует в user_data при выборе кнопки для fragment_id: {fragment_id}")
             raise ValueError("Данные истории не найдены.")
 
@@ -4990,6 +5456,21 @@ async def handle_select_choice_to_edit(update: Update, context: ContextTypes.DEF
         choice_to_edit_data = choices_list[choice_index_to_edit]
         current_choice_text = choice_to_edit_data.get("text", "Текст отсутствует")
 
+        # Добавим эффекты, если они есть
+        effects = choice_to_edit_data.get("effects", [])
+        if effects:
+            effect_parts = []
+            for effect in effects:
+                stat = effect.get("stat", "???")
+                value = effect.get("value", "?")
+                hide = effect.get("hide", False)
+                if hide:
+                    effect_parts.append(f"{stat}:{value}(hide)")
+                else:
+                    effect_parts.append(f"{stat}:{value}")
+            effects_str = "{{" + ", ".join(effect_parts) + "}}"
+            current_choice_text += f" {effects_str}"
+
     except (IndexError, ValueError, TypeError) as e:
         logger.error(f"Ошибка при извлечении индекса/ключа для редактирования из {data} для fragment_id {fragment_id}: {e}")
         context.user_data.pop('editing_choice_fragment_id', None)
@@ -4997,10 +5478,12 @@ async def handle_select_choice_to_edit(update: Update, context: ContextTypes.DEF
         await show_fragment_actions(update, context, fragment_id)
         return ADD_CONTENT
 
-    # Сохраняем индекс кнопки, которую будем менять
     context.user_data['choice_index_to_edit'] = choice_index_to_edit
 
-    await query.edit_message_text(f"Вы выбрали кнопку: '{current_choice_text}'.\nВведите новый текст для этой кнопки:")
+    await query.edit_message_text(
+        f"Вы выбрали кнопку: <code>{current_choice_text}</code>.\nВведите новый текст для этой кнопки:",
+        parse_mode='HTML'
+    )
 
     return AWAITING_NEW_CHOICE_TEXT
 
@@ -5012,8 +5495,10 @@ async def handle_new_choice_text(update: Update, context: ContextTypes.DEFAULT_T
     """Получает новый текст для кнопки, обновляет данные истории и сохраняет."""
     new_text = update.message.text.strip()
 
-    if not new_text or len(new_text) > 50: # Ограничение длины текста кнопки
-        await update.message.reply_text("Текст кнопки не может быть пустым и должен быть не длиннее 50 символов. Попробуйте снова:")
+    check_text = re.sub(r"\{\{.*?\}\}", '', new_text).strip()
+
+    if not check_text or len(check_text) > 35: # Ограничение длины текста кнопки
+        await update.message.reply_text("Текст кнопки не может быть пустым и должен быть не длиннее 35 символов. Попробуйте снова:")
         return AWAITING_NEW_CHOICE_TEXT
 
     fragment_id = context.user_data.get('editing_choice_fragment_id')
@@ -5058,15 +5543,30 @@ async def handle_new_choice_text(update: Update, context: ContextTypes.DEFAULT_T
     old_text = choices_list[choice_index_to_edit].get("text", "N/A") # Для логгирования и сообщений
 
     # Проверка, не используется ли новый текст уже в ДРУГОЙ кнопке этого фрагмента
+
+
+    cleaned_text, parsed_effects, errors = parse_effects_from_text(new_text)
+
+    if errors:
+        await update.message.reply_text(
+            "Обнаружены ошибки в тегах эффектов:\n\n" + "\n".join(errors) + "\n\nПожалуйста, исправьте их и отправьте текст снова."
+        )
+        return AWAITING_NEW_CHOICE_TEXT
+
+
     for i, choice_item in enumerate(choices_list):
-        if i != choice_index_to_edit and choice_item.get("text") == new_text:
-            await update.message.reply_text(f"Текст '{new_text}' уже используется для другой кнопки в этом фрагменте. Введите другое название:")
+        if i != choice_index_to_edit and choice_item.get("text") == cleaned_text:
+            await update.message.reply_text(f"Текст '{cleaned_text}' уже используется для другой кнопки в этом фрагменте. Введите другое название:")
             return AWAITING_NEW_CHOICE_TEXT
 
     # --- Начало измененной логики для обновления списка ---
     # Обновляем текст у элемента списка по его индексу. 'target' остается неизменным.
+
+
     try:
-        context.user_data['current_story']['fragments'][fragment_id]['choices'][choice_index_to_edit]['text'] = new_text
+        choice_entry = context.user_data['current_story']['fragments'][fragment_id]['choices'][choice_index_to_edit]
+        choice_entry['text'] = cleaned_text
+        choice_entry['effects'] = parsed_effects
     except (KeyError, IndexError, TypeError) as e:
         logger.error(f"Ошибка при обновлении текста кнопки: {e}. fragment_id={fragment_id}, choice_index={choice_index_to_edit}")
         await update.message.reply_text("Произошла ошибка при сохранении изменений. Попробуйте снова.")
@@ -5118,7 +5618,7 @@ async def handle_prev_fragment(update: Update, context: ContextTypes.DEFAULT_TYP
             # num == 1, ищем кто ссылается на этот фрагмент
             referring = [
                 fid for fid, frag in fragments.items()
-                if any(choice.get("target") == fragment_id for choice in frag.get("choices", []))
+                if fid != fragment_id and any(choice.get("target") == fragment_id for choice in frag.get("choices", []))
             ]
             if not referring:
                 return None
@@ -5431,11 +5931,39 @@ async def show_fragment_actions(update: Update, context: ContextTypes.DEFAULT_TY
 
     text = current_fragment.get("text", "").strip()
     if text:
-        text_lines.append(f"Текст: \n✦ ━━━━━━━━━━\n{text}\n ✦ ━━━━━━━━━━")
+        text_lines.append(f"Текст: \n✦ ━━━━━━━━━━\n{text}\n✦ ━━━━━━━━━━")
+
+
+    # Добавим информацию об эффектах, если они есть
+    for choice in current_choices:
+        if "effects" in choice:
+            effect_lines = []
+            for effect in choice["effects"]:
+                stat = html.escape(str(effect.get("stat", "неизвестно")))
+                if effect.get("hide"):
+                    stat = f"{stat}(Скрытый)"
+                raw_value = str(effect.get("value", "?"))
+                value = html.escape(raw_value)
+
+                # Определяем тип эффекта по value
+                if re.match(r'^[+-]\d+', raw_value):
+                    verb = "меняет атрибут"
+                elif re.match(r'^[<>=]', raw_value):
+                    verb = "проверка атрибута"
+                else:
+                    verb = "задаёт атрибут"
+
+                effect_lines.append(f"{stat}: {value} ({verb})")
+
+            if effect_lines:
+                effects_text = ", ".join(effect_lines)
+                text_lines.append(
+                    f"\n\n🔸 Выбор <b>«{html.escape(choice['text'])}»</b> ведущий на фрагмент <code>{html.escape(choice['target'])}</code> имеет эффект: {effects_text}"
+                )
 
     # Добавим пояснение и финальное действие
     text_lines.append(
-        "\n<i>Если сейчас вы отправите боту новый текст или медиа-контент, то он заменит прошлый в данном слайде</i>\n"
+        "\n\n<i>Если сейчас вы отправите боту новый текст или медиа-контент, то он заменит прошлый в данном слайде</i>\n"
     )
     text_lines.append("Либо выберите действие:")
 
@@ -5594,9 +6122,11 @@ async def select_link_target_handler(update: Update, context: ContextTypes.DEFAU
                 return steps[0]['delay'] if steps else 0  # Сортировка по первому delay, если есть
 
             targetable_fragment_ids = sorted(
-                (f_id for f_id in all_fragment_ids if f_id != current_fragment_id),
+                all_fragment_ids,
                 key=get_sort_key_by_timing
             )
+                   
+
 
             reply_markup = build_fragment_selection_keyboard(
                 user_id_str=user_id_str,
@@ -5670,20 +6200,33 @@ async def select_link_target_handler(update: Update, context: ContextTypes.DEFAU
             await show_fragment_actions(update, context, current_fragment_id)
             return ADD_CONTENT
 
-        # --- Модификация данных истории ---
-        # Добавляем выбор в текущий фрагмент (в словаре story_data)
+        # --- Парсинг текста кнопки и эффектов --
+
+        cleaned_text, effects, errors = parse_effects_from_text(button_text)
+
+        if errors:
+            await update.message.reply_text(
+                "Обнаружены ошибки в тегах эффектов:\n\n" + "\n".join(errors) + "\n\nПожалуйста, исправьте их и отправьте текст снова."
+            )
+            return SELECT_LINK_TARGET
+
+
+        # --- Добавление выбора в фрагмент ---
         if 'choices' not in story_data['fragments'][current_fragment_id]:
             story_data['fragments'][current_fragment_id]['choices'] = []
-        story_data['fragments'][current_fragment_id]['choices'].append({
-            "text": button_text,
+
+        choice_data = {
+            "text": cleaned_text,
             "target": target_fragment_id
-        })
+        }
 
-        # Обновляем данные в контексте *перед* сохранением, чтобы helper мог их взять
+        if effects:
+            choice_data["effects"] = effects
+
+        story_data['fragments'][current_fragment_id]['choices'].append(choice_data)
+
         context.user_data['current_story'] = story_data
-        logger.info(f"Добавлена ссылка из '{current_fragment_id}' на '{target_fragment_id}' с текстом '{button_text}'. Данные в контексте обновлены.")
-
-        # --- ИСПОЛЬЗУЕМ ВАШУ ФУНКЦИЮ СОХРАНЕНИЯ ---
+        logger.info(f"Добавлена ссылка из '{current_fragment_id}' на '{target_fragment_id}' с текстом '{cleaned_text}' и эффектами {effects}.")
         save_current_story_from_context(context)
         # -----------------------------------------
 
@@ -5721,12 +6264,15 @@ async def ask_link_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Получаем текст кнопки
     button_text = update.message.text if update.message else None
-    if not button_text:
+
+    check_text = re.sub(r"\{\{.*?\}\}", '', button_text).strip()
+
+    if not check_text:
         await update.message.reply_text("Текст кнопки не может быть пустым. Попробуйте еще раз:")
         return ASK_LINK_TEXT
 
-    if len(button_text) > 30:
-        await update.message.reply_text("Текст кнопки не должен превышать 30 символов. Попробуйте еще раз:")
+    if len(check_text) > 35:
+        await update.message.reply_text("Текст кнопки не должен превышать 35 символов. Попробуйте еще раз:")
         return ASK_LINK_TEXT
 
     # Сохраняем текст кнопки
@@ -5753,7 +6299,7 @@ async def ask_link_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Получаем все ID фрагментов, кроме текущего
     all_fragment_ids = sorted(story_data.get("fragments", {}).keys())
-    targetable_fragment_ids = [f_id for f_id in all_fragment_ids if f_id != current_fragment_id]
+    targetable_fragment_ids = all_fragment_ids
 
 
 
@@ -5829,12 +6375,13 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
 
     elif action == 'continue_linear':
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_fragment_actions")]
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_fragment_actions")],
+            [InlineKeyboardButton("ℹ Помощь", callback_data="linkhelp")]
         ])
         await query.edit_message_text(
             "Введите текст для кнопки ведущей от текущего фрагмента к следующему. (например, \"Далее\", \"Осмотреться\", \"Встать\").\n\n"
-            "<i>Если вместо текста вы отправите число от 0.1 до 90000, то в таком случае кнопки у текущего фрагмента "
-            "не будет, вместо этого он переключится дальше автоматически через время равное заданному числу в секундах.</i>",
+            "<i>Для более сложных историй продвинутого уровня вы так же можете задать тут автоматического перехода по таймеру вместо кнопки с текстом. "
+            "Или указать любые меняющиеся по ходу истории атрибуты. Подробнее по кнопке Помощи ниже, либо по кнопке Обучения из главного меню.</i>\n\n",            
             parse_mode='HTML',
             reply_markup=keyboard
         )
@@ -5859,11 +6406,14 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
     # НОВЫЙ БЛОК: Обработка кнопки "Связать с прошлым"
     elif action == 'link_to_previous':
         keyboard = [
+            [InlineKeyboardButton("ℹ Помощь", callback_data="linkhelp")],
             [InlineKeyboardButton("🔙 Назад", callback_data='link_cancel')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            "Введите текст для кнопки отсылающей к другому фрагменту (например, 'Вернуться назад', 'Перейти к главе 1' и тд):",
+            "Введите текст для кнопки отсылающей к другому фрагменту \(например, 'Вернуться назад', 'Перейти к главе 1' и тд\):\n\n"
+            "_Вы так же можете задать различные атрибуты в двойных фигурных скобках\\. Подробнее по кнопке ниже_",
+            parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
         context.user_data['pending_action'] = 'link_to_previous'  # Запомним действие
@@ -6064,54 +6614,120 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
         return ADD_CONTENT
 
 
-def insert_shifted_fragment(story_data: dict, fragment_id: str, button_text: str) -> str:
-    fragments = story_data['fragments']
-    new_child_id = f"{fragment_id}1"
 
-    if new_child_id not in fragments:
-        return new_child_id
 
-    # Шаг 1: собираем все потомки fragment_id по шаблону
-    affected = {}
-    pattern = re.compile(rf"^{re.escape(fragment_id)}\d+$")
-    for fid in list(fragments.keys()):
-        if fid != fragment_id and pattern.match(fid):
-            tail = fid[len(fragment_id):]
-            new_fid = f"{fragment_id}1{tail}"
-            affected[fid] = new_fid
 
-    # Шаг 2: переименовываем фрагменты
-    for old_id, new_id in sorted(affected.items(), key=lambda x: -len(x[0])):
-        fragments[new_id] = fragments.pop(old_id)
 
-    # Шаг 3: обновляем все choices
-    for fid, frag in fragments.items():
-        if 'choices' in frag:
-            updated_choices = [
-                {"text": choice["text"], "target": affected.get(choice["target"], choice["target"])}
-                for choice in frag['choices']
-            ]
-            frag['choices'] = updated_choices
 
-    # Шаг 4: переносим choices из старого фрагмента в новый
-    old_choices = fragments[fragment_id].get('choices', [])
-    fragments[new_child_id] = {
-        "text": "",
-        "media": [],
-        "choices": old_choices.copy()  # или просто old_choices, если не нужна глубокая копия
-    }
-    fragments[fragment_id]['choices'] = [{"text": button_text, "target": new_child_id}]
 
-    return new_child_id
+def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str]]:
+    clean_text = button_text
+    effects = []
+    errors = []
 
+    effect_tag_pattern = re.compile(r"\{\{(.*?)\}\}")
+
+    for match in effect_tag_pattern.finditer(button_text):
+        full_tag = match.group(0)
+        content = match.group(1).strip()
+
+        # Поддержка нескольких атрибутов через запятую
+        items = [item.strip() for item in content.split(',') if item.strip()]
+        for item in items:
+            if ':' not in item:
+                phrase = item.strip()
+                value_part = "1"
+            else:
+                phrase, value_part = map(str.strip, item.split(':', 1))
+
+            # Проверка на значение с возможным (hide)
+            value_match = re.fullmatch(r"([+\-<>=]?)\s*(\d+)\s*(?:\((hide)\))?", value_part, re.IGNORECASE)
+            if not value_match:
+                errors.append(f"Ошибка в теге {full_tag}: неверный формат значения '{value_part}'. Пример: +2, -1 (hide), =3 и т.п.")
+                continue
+
+            symbol = value_match.group(1)
+            number = value_match.group(2)
+            hide = value_match.group(3) is not None
+
+            effects.append({
+                "stat": phrase.lower(),
+                "value": f"{symbol}{number}",
+                "hide": hide
+            })
+
+        # Удаляем тег из текста
+        clean_text = clean_text.replace(full_tag, '').strip()
+
+    return clean_text, effects, errors
+
+
+
+
+
+
+def describe_effects_from_button_text(button_text: str) -> list[str]:
+    effects = []
+    # Находим все блоки {{...}}
+    block_pattern = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
+
+    for block_match in re.finditer(block_pattern, button_text):
+        content = block_match.group(1)
+
+        # Разбиваем по запятой, если в блоке несколько параметров
+        parts = [p.strip() for p in content.split(',') if p.strip()]
+
+        for part in parts:
+            # Проверяем, есть ли скрытый эффект
+            hide = False
+            if '(hide)' in part.lower():
+                part = re.sub(r'\(hide\)', '', part, flags=re.IGNORECASE).strip()
+                hide = True
+
+            # Разбираем параметр и значение
+            stat_match = re.match(r"(.*?):\s*([+\-<>=]?\d+)", part)
+            if not stat_match:
+                continue
+
+            stat = stat_match.group(1).strip()
+            value = stat_match.group(2).strip()
+
+            if re.match(r"^[+\-]\d+$", value):
+                desc = f"Значение ({stat.lower()}) изменится на {value}"
+            elif re.match(r"^[<>=]\d+$", value):
+                desc = f"Проверка ({stat}) на значение {value}"
+            elif re.match(r"^\d+$", value):
+                desc = f"Значение ({stat.lower()}) задано на {value}"
+            else:
+                continue
+
+            if hide:
+                desc += ". Не отображается пользователю"
+            
+            effects.append(desc)
+
+    return effects
+
+def escape_markdown(text: str) -> str:
+    """
+    Экранирует специальные символы Markdown для безопасного отображения текста.
+    Подходит для Markdown и MarkdownV2.
+    """
+    escape_chars = r"_`#|\\"
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
 
 async def ask_continue_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получает текст для кнопки линейного перехода и создает ID следующего фрагмента."""
     button_text = update.message.text
     
+    check_text = re.sub(r"\{\{.*?\}\}", '', button_text).strip()
+
+    if not check_text:
+        await update.message.reply_text("Текст кнопки не может быть пустым. Попробуйте еще раз:")
+        return ASK_CONTINUE_TEXT
     # Проверка длины текста кнопки
-    if len(button_text) > 30:
-        await update.message.reply_text("Текст кнопки не должен превышать 30 символов. Попробуйте еще раз:")
+    if len(check_text) > 35:
+        await update.message.reply_text("Текст кнопки не должен превышать 35 символов. Попробуйте еще раз:")
         return ASK_CONTINUE_TEXT  # Остаемся в том же состоянии
 
     
@@ -6128,7 +6744,19 @@ async def ask_continue_text_handler(update: Update, context: ContextTypes.DEFAUL
         return ConversationHandler.END
 
     # Используем новую функцию для создания узла и возможного сдвига
-    new_active_fragment_id = create_linear_continuation_node(story_data, current_id, button_text)
+    # Парсим текст кнопки и эффекты
+    clean_button_text, effects, errors = parse_effects_from_text(button_text)
+
+    if errors:
+        await update.message.reply_text(
+            "Обнаружены ошибки в тегах эффектов:\n\n" + "\n".join(errors) + "\n\nПожалуйста, исправьте их и отправьте текст снова."
+        )
+        return ASK_CONTINUE_TEXT
+
+    # Создаем новый узел
+    new_active_fragment_id = create_linear_continuation_node(
+        story_data, current_id, clean_button_text, effects=effects
+    )
 
     if not new_active_fragment_id:
         await update.message.reply_text("Не удалось создать следующий фрагмент. Пожалуйста, попробуйте снова или обратитесь к администратору.")
@@ -6144,20 +6772,30 @@ async def ask_continue_text_handler(update: Update, context: ContextTypes.DEFAUL
     # context.user_data.pop('pending_action', None) # Эта логика была специфична для числовых ID и выбора индекса
     save_current_story_from_context(context) # Убедитесь, что эта функция сохраняет изменения
 
+    # Получаем текст описания эффектов для отображения пользователю
+    extra_descriptions = describe_effects_from_button_text(button_text)
     # Проверка: является ли button_text числом (целым или дробным), без посторонних символов
+    escaped_button_text = escape_markdown(clean_button_text)
+    escaped_fragment_id = escape_markdown(str(new_active_fragment_id))
+    escaped_extra_descriptions = [escape_markdown(desc) for desc in extra_descriptions]
+
     if re.fullmatch(r"\d+(\.\d+)?", button_text):
         message = (
-            f"Автоматический переход в {button_text} сек. ведущий на фрагмент `{new_active_fragment_id}` создан.\n\n"
-            f"_Теперь отправьте контент (текст или фото, gif, музыку, видео) для нового фрагмента_ `{new_active_fragment_id}`.\n "
-            f"_Текст поддерживает всю разметку телеграм._"
+            f"Автоматический переход в {escaped_button_text} сек. ведущий на фрагмент {escaped_fragment_id} создана.\n\n"
         )
     else:
         message = (
-            f"Кнопка \"`{button_text}`\" ведущая на фрагмент `{new_active_fragment_id}` создана.\n\n"
-            f"_Теперь отправьте контент (текст или фото, gif, музыку, видео) для нового фрагмента_ `{new_active_fragment_id}`.\n "
-            f"_Текст поддерживает всю разметку телеграм._"
+            f"Кнопка \"{escaped_button_text}\" ведущая на фрагмент {escaped_fragment_id} создана.\n\n"
         )
 
+    if extra_descriptions:
+        message += "\n".join(escaped_extra_descriptions) + "\n\n"
+
+    message += (
+        f"_Теперь отправьте контент (текст или фото, gif, музыку, видео) для нового фрагмента_ {escaped_fragment_id}.\n"
+        f"_Текст поддерживает всю разметку телеграм._"
+    )
+    logger.info(f"message {message} ")
     await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     return ADD_CONTENT
 
@@ -6165,16 +6803,30 @@ async def ask_continue_text_handler(update: Update, context: ContextTypes.DEFAUL
 
 async def ask_branch_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получает текст для кнопки новой развилки и создает ID для ветки."""
-    button_text = update.message.text
+    raw_button_text = update.message.text
     
-    # Проверка длины текста кнопки
-    if len(button_text) > 30:
-        await update.message.reply_text("Текст кнопки не должен превышать 30 символов. Попробуйте еще раз:")
-        return ASK_BRANCH_TEXT  # Остаемся в том же состоянии
+    check_text = re.sub(r"\{\{.*?\}\}", '', raw_button_text).strip()
+    if not check_text:
+        await update.message.reply_text("Текст кнопки не может быть пустым. Попробуйте еще раз:")
+        return ASK_LINK_TEXT
+    if len(check_text) > 35:  # Увеличено ограничение для текста с эффектами
+        await update.message.reply_text("Текст кнопки не должен превышать 35 символов. Попробуйте еще раз:")
+        return ASK_BRANCH_TEXT
+
+
+    # --- Новый участок: разбираем эффекты из текста кнопки ---
+
+    button_text, effects, errors = parse_effects_from_text(raw_button_text)
+
+    if errors:
+        await update.message.reply_text(
+            "Обнаружены ошибки в тегах эффектов:\n\n" + "\n".join(errors) + "\n\nПожалуйста, исправьте их и отправьте текст снова."
+        )
+        return ASK_BRANCH_TEXT
+
 
     current_fragment_id = context.user_data.get('current_fragment_id')
     story_data = context.user_data.get('current_story')
-
     target_branch_name = context.user_data.get('target_branch_name')
     target_branch_index = context.user_data.get('target_branch_index')
 
@@ -6203,12 +6855,20 @@ async def ask_branch_text_handler(update: Update, context: ContextTypes.DEFAULT_
             {"text": button_text, "target": branch_fragment_id}
         )
     choices = story_data['fragments'][current_fragment_id].setdefault('choices', [])
+    # --- Новый участок: обновление существующего выбора или добавление нового с effects ---
     for choice in choices:
-        if choice['text'] == button_text:
-            choice['target'] = branch_fragment_id
+        if choice['text'] == button_text and choice['target'] == branch_fragment_id:
+            # Возможно, стоит обновить только эффекты
+            if effects:
+                choice['effects'] = effects
             break
     else:
-        choices.append({"text": button_text, "target": branch_fragment_id})
+        # Добавим новую ветку, если такой пары text+target ещё не было
+        new_choice = {"text": button_text, "target": branch_fragment_id}
+        if effects:
+            new_choice["effects"] = effects
+        choices.append(new_choice)
+
 
 
 
@@ -6237,10 +6897,69 @@ async def ask_branch_text_handler(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+    current_fragment = story_data['fragments'][current_fragment_id]
+    current_choices = current_fragment.get("choices", [])
+
+    text_lines = [
+        f"✅ Вы успешно создали новую ветку.\n\nТекущий фрагмент: <code>{current_fragment_id}</code>.\n"
+        "Выберите следующее действие или нажмите на созданную ветку, чтобы начать её заполнять:\n"
+    ]
+
+    # Медиа
+    media = current_fragment.get("media", [])
+    if media:
+        types_count = {}
+        for item in media:
+            media_type = item.get("type", "unknown")
+            types_count[media_type] = types_count.get(media_type, 0) + 1
+        media_lines = [f"{media_type}: {count}" for media_type, count in types_count.items()]
+        text_lines.append("📎 Медиа: " + ", ".join(media_lines))
+
+    # Текст фрагмента
+    text = current_fragment.get("text", "").strip()
+    if text:
+        escaped_text = html.escape(text)
+        text_lines.append(f"📝 Текст:\n✦ ━━━━━━━━━━\n{escaped_text}\n✦ ━━━━━━━━━━")
+
+    for choice in current_choices:
+        if "effects" in choice:
+            effect_lines = []
+            for effect in choice["effects"]:
+                stat = html.escape(str(effect.get("stat", "неизвестно")))
+                if effect.get("hide"):
+                    stat = f"{stat}(Скрытый)"
+                raw_value = str(effect.get("value", "?"))
+                value = html.escape(raw_value)
+
+                # Определяем тип эффекта по value
+                if re.match(r'^[+-]\d+', raw_value):
+                    verb = "меняет атрибут"
+                elif re.match(r'^[<>=]', raw_value):
+                    verb = "проверка атрибута"
+                else:
+                    verb = "задаёт атрибут"
+
+                effect_lines.append(f"{stat}: {value} ({verb})")
+
+            if effect_lines:
+                effects_text = ", ".join(effect_lines)
+                text_lines.append(
+                    f"\n\n🔸 Выбор <b>«{html.escape(choice['text'])}»</b> ведущий на фрагмент <code>{html.escape(choice['target'])}</code> имеет эффект: {effects_text}"
+                )
+
+    # Финальное сообщение
+    text_lines.append(
+        "\n<i>Если сейчас вы отправите боту новый текст или медиа-контент, он заменит прежний в этом слайде.</i>\n"
+        "Либо выберите действие:"
+    )
+
+    # Сообщение
+    final_text = "\n".join(text_lines)
+
     await update.message.reply_text(
-        f"Фрагмент `{current_fragment_id}`. Выберите следующее действие или нажмите на созданную ветку, чтобы начать её заполнять:",
+        final_text,
         reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.HTML
     )
 
     return ADD_CONTENT
@@ -6284,7 +7003,7 @@ def get_all_branch_base_names(story_data: dict) -> set[str]:
 
 
 # Заменит insert_shifted_fragment
-def create_linear_continuation_node(story_data: dict, base_id: str, button_text: str) -> str | None:
+def create_linear_continuation_node(story_data: dict, base_id: str, button_text: str, effects: dict | None = None) -> str | None:
     """
     Создает узел для линейного продолжения.
     Если у base_id уже есть choices, они переносятся на новый узел.
@@ -6308,9 +7027,13 @@ def create_linear_continuation_node(story_data: dict, base_id: str, button_text:
     if target_node_id not in fragments:
         old_choices = fragments[base_id].get('choices', []).copy()
 
-        new_choices = [{"text": button_text, "target": target_node_id}] + old_choices
+        new_choice = {"text": button_text, "target": target_node_id}
+        if effects:
+            new_choice["effects"] = effects
 
+        new_choices = [new_choice] + old_choices
         fragments[base_id]['choices'] = new_choices
+
         fragments[target_node_id] = {
             "text": "",
             "media": [],
@@ -6353,10 +7076,13 @@ def create_linear_continuation_node(story_data: dict, base_id: str, button_text:
                     updated_target = ids_to_update_in_choices.get(choice['target'], choice['target'])
                     if updated_target != choice['target']:
                         changed = True
-                    updated_choices.append({
+                    new_choice = {
                         "text": choice['text'],
                         "target": updated_target
-                    })
+                    }
+                    if 'effects' in choice:
+                        new_choice['effects'] = choice['effects']
+                    updated_choices.append(new_choice)
                 if changed:
                     frag_data_iter['choices'] = updated_choices
 
@@ -6364,10 +7090,20 @@ def create_linear_continuation_node(story_data: dict, base_id: str, button_text:
 
     fragments[base_id]['choices'] = [{"text": button_text, "target": target_node_id}]
 
+    preserved_choices = []
+    for choice in old_choices_of_base_id:
+        new_choice = {
+            "text": choice['text'],
+            "target": choice['target']
+        }
+        if 'effects' in choice:
+            new_choice['effects'] = choice['effects']
+        preserved_choices.append(new_choice)
+
     fragments[target_node_id] = {
         "text": "",
         "media": [],
-        "choices": old_choices_of_base_id
+        "choices": preserved_choices
     }
     logger.info(f"Linear continuation: '{base_id}' --({button_text})--> '{target_node_id}'. Old choices moved to '{target_node_id}'.")
     return target_node_id
@@ -6406,9 +7142,14 @@ async def ask_new_branch_name_handler(update: Update, context: ContextTypes.DEFA
 
     await update.message.reply_text(
         f"Отлично\\! Теперь введите текст для кнопки, которая будет вести к началу ветки `{new_branch_name_input}_1`\n"
-        f'Например "Пойти направо", "Сесть", "Согласиться" и тд',
-        parse_mode="MarkdownV2"
+        f'Например "Пойти направо", "Сесть", "Согласиться" и тд\n\n'
+        f"_Вы так же можете задать различные атрибуты в двойных фигурных скобках\\. Подробнее по кнопке ниже_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ℹ Помощь", callback_data="linkhelp")]
+        ])
     )
+
     return ASK_BRANCH_TEXT
 
 
@@ -6427,13 +7168,13 @@ async def ask_new_branch_name_handler(update: Update, context: ContextTypes.DEFA
 async def reorder_choices_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     query = update.callback_query
     await query.answer()
-    # fragment_id извлекается из callback_data
+
     try:
         fragment_id = query.data.split(REORDER_CHOICES_START_PREFIX)[1]
     except IndexError:
         logger.error(f"Ошибка извлечения fragment_id из callback_data: {query.data}")
         await query.edit_message_text("Произошла ошибка. Не удалось определить фрагмент.")
-        return ConversationHandler.END # Или возврат в безопасное состояние
+        return ConversationHandler.END
 
     if 'current_story' not in context.user_data:
         logger.error("current_story отсутствует в user_data при вызове reorder_choices_start")
@@ -6445,23 +7186,23 @@ async def reorder_choices_start(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not current_fragment or "choices" not in current_fragment:
         await query.edit_message_text("Ошибка: Фрагмент или его выборы не найдены.")
-        # Здесь можно добавить кнопку "Назад" к show_fragment_actions, если это возможно
-        return ADD_CONTENT # Возврат к основному состоянию редактирования фрагмента
+        await show_fragment_actions(update, context, fragment_id)
+        return ADD_CONTENT
 
     choices = current_fragment["choices"]
     if len(choices) <= 1:
         await query.edit_message_text("Недостаточно вариантов для изменения порядка.")
-        # Вернуть пользователя к show_fragment_actions для этого fragment_id
         await show_fragment_actions(update, context, fragment_id)
         return ADD_CONTENT
 
     context.user_data['reorder_fragment_id'] = fragment_id
-    # Сохраняем выборы как список кортежей (текст_кнопки, цель_перехода) для сохранения порядка
-    context.user_data['reorder_choices_list'] = [(c["text"], c["target"]) for c in choices]
+    # Сохраняем весь список выбора (dict), чтобы не потерять дополнительные поля вроде "effects"
+    context.user_data['reorder_choices_list'] = choices.copy()
 
     keyboard = []
-    for index, (text, _) in enumerate(context.user_data['reorder_choices_list']):
-        keyboard.append([InlineKeyboardButton(text, callback_data=f"{REORDER_CHOICE_ITEM_PREFIX}{index}")])
+    for index, choice in enumerate(choices):
+        button_text = choice.get("text", f"Выбор {index + 1}")
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"{REORDER_CHOICE_ITEM_PREFIX}{index}")])
 
     keyboard.append([InlineKeyboardButton("Отмена", callback_data=REORDER_CHOICE_CANCEL)])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -6495,7 +7236,7 @@ async def reorder_choice_select_position_prompt(update: Update, context: Context
         return ConversationHandler.END
 
     context.user_data['reorder_selected_item_index'] = selected_index
-    selected_item_text = choices_list[selected_index][0]
+    selected_item_text = choices_list[selected_index].get("text", "без текста")
 
     keyboard = [
         [InlineKeyboardButton("В самый верх", callback_data=f"{REORDER_CHOICE_POSITION_PREFIX}top")],
@@ -6526,7 +7267,6 @@ async def reorder_choice_execute(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     fragment_id = context.user_data.get('reorder_fragment_id')
-    # Копируем список для изменений, чтобы не модифицировать оригинал в user_data до подтверждения
     choices_list = list(context.user_data.get('reorder_choices_list', []))
     selected_item_original_index = context.user_data.get('reorder_selected_item_index')
 
@@ -6541,42 +7281,34 @@ async def reorder_choice_execute(update: Update, context: ContextTypes.DEFAULT_T
             return ADD_CONTENT
         return ConversationHandler.END
 
-    if action == "asis":
-        # Ничего не делаем с порядком, choices_list уже в исходном состоянии
-        pass
-    else:
-        item_to_move_tuple = choices_list.pop(selected_item_original_index)
+    # Выполняем перемещение элемента
+    if action != "asis":
+        item_to_move = choices_list.pop(selected_item_original_index)
         if action == "top":
-            choices_list.insert(0, item_to_move_tuple)
+            choices_list.insert(0, item_to_move)
         elif action == "up":
             new_insert_idx = max(0, selected_item_original_index - 1)
-            choices_list.insert(new_insert_idx, item_to_move_tuple)
+            choices_list.insert(new_insert_idx, item_to_move)
         elif action == "down":
-            # Вставляем на позицию original_index + 1, но в списке, который уже короче на 1 элемент.
-            # Эта позиция в укороченном списке соответствует original_index + 1 в оригинальном.
-            # Максимальный индекс для вставки - len(choices_list) (для добавления в конец).
             new_insert_idx = min(len(choices_list), selected_item_original_index + 1)
-            choices_list.insert(new_insert_idx, item_to_move_tuple)
+            choices_list.insert(new_insert_idx, item_to_move)
         elif action == "bottom":
-            choices_list.append(item_to_move_tuple)
+            choices_list.append(item_to_move)
 
-    # Обновляем данные истории
-    context.user_data['current_story']['fragments'][fragment_id]['choices'] = [
-        {"text": text, "target": target} for text, target in choices_list
-    ]
+    # Обновляем данные истории — просто сохраняем новый список dict
+    context.user_data['current_story']['fragments'][fragment_id]['choices'] = choices_list
     save_current_story_from_context(context)
     logger.info(f"Порядок choices для фрагмента {fragment_id} обновлен.")
 
-    # Очищаем временные данные из user_data
+    # Очищаем временные данные
     for key in ['reorder_fragment_id', 'reorder_choices_list', 'reorder_selected_item_index']:
         context.user_data.pop(key, None)
 
-    context.user_data['current_fragment_id'] = fragment_id # Для корректного отображения в show_fragment_actions
+    context.user_data['current_fragment_id'] = fragment_id
 
-    await query.edit_message_text("Порядок кнопок обновлен.") # Можно убрать, если show_fragment_actions полностью перерисовывает
-    await show_fragment_actions(update, context, fragment_id) # Обновляем основную клавиатуру
-    return ADD_CONTENT # Возвращаемся в основное состояние редактирования контента
-
+    await query.edit_message_text("Порядок кнопок обновлен.")
+    await show_fragment_actions(update, context, fragment_id)
+    return ADD_CONTENT
 
 # Обработчик отмены для процесса изменения порядка
 async def reorder_choice_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -6645,7 +7377,7 @@ def generate_story_map(story_id: str, story_data: dict, highlight_ids: set[str] 
         logger.warning(f"В данных истории '{story_id}' отсутствуют фрагменты или они некорректны.")
         return None
 
-    G = nx.DiGraph()
+    G = nx.MultiDiGraph()
     G.graph['graph'] = {
         'rankdir': 'LR',
         'center': 'true',
@@ -6737,12 +7469,72 @@ def generate_story_map(story_id: str, story_data: dict, highlight_ids: set[str] 
             # Интерпретируем числовые варианты выбора как "задержка X секунд"
             try:
                 int_choice = int(choice_text)
-                edge_label = f"задержка {int_choice} секунд"
+                base_label = f"задержка {int_choice} секунд"
             except ValueError:
-                edge_label = choice_text[:40] + "..." if len(choice_text) > 40 else choice_text
+                base_label = choice_text[:40] + "..." if len(choice_text) > 40 else choice_text
+
+            # Добавляем эффекты, если есть
+            effects = choice.get("effects")
+            effects_html_label = ""
+            if isinstance(effects, list) and effects:
+                effect_rows = ""
+                has_check_symbols = False
+                check_symbols = ('>', '<', '=')
+
+                for effect in effects:
+                    if not isinstance(effect, dict):
+                        continue
+                    stat = effect.get("stat")
+                    value = effect.get("value")
+                    hide = effect.get("hide", False)
+
+                    if not stat or value is None:
+                        continue
+
+                    raw_effect_value = str(value)
+                    is_check = any(symbol in raw_effect_value for symbol in check_symbols)
+                    if is_check:
+                        has_check_symbols = True
+
+                    safe_stat = html.escape(stat)
+                    safe_value = html.escape(raw_effect_value)
+                    effect_row = f"{safe_stat}: {safe_value}"
+                    if hide:
+                        effect_row += " (скрытый)"
+
+                    # Выбор цвета строки:
+                    if hide:
+                        row_color = "#c7c7d2"  # скрытые — общий цвет
+                    elif is_check:
+                        row_color = "#c5b7ff"  # проверки (не скрытые)
+                    else:
+                        row_color = "#d1e9ff"  # эффекты (не скрытые)
+
+                    effect_rows += f"<TR><TD ALIGN='LEFT' BGCOLOR='{row_color}'>{effect_row}</TD></TR>"
+
+                table_title = "Проверка" if has_check_symbols else "Эффекты"
+                title_color = "#c3b5f5" if has_check_symbols else "#b5d6f5"
+
+                effects_html_label = f"""<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">
+                <TR><TD ALIGN='CENTER' BGCOLOR='{title_color}'><B>{table_title}:</B></TD></TR>
+                {effect_rows}
+                </TABLE>"""
+
+
+            # Объединяем метку стрелки
+            if effects_html_label:
+                edge_label = f"""<
+            <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="1">
+              <TR><TD>{html.escape(base_label)}</TD></TR>
+              <TR><TD>{effects_html_label}</TD></TR>
+            </TABLE>
+            >"""
+            else:
+                edge_label = base_label
 
             if not G.has_node(next_fragment_id):
                 G.add_node(next_fragment_id)
+                G.add_edge(fragment_id, next_fragment_id, label=edge_label, color='red') # Установите атрибуты напрямую
                 node_labels[next_fragment_id] = f"[MISSING]\n{next_fragment_id}"
                 node_colors[next_fragment_id] = 'lightcoral'
 
@@ -6755,10 +7547,11 @@ def generate_story_map(story_id: str, story_data: dict, highlight_ids: set[str] 
             else:
                 branch_prefix = fragment_id.rsplit('_', 1)[0]
                 branch_color = branch_colors.get(branch_prefix, 'grey')
-                edge_colors[(fragment_id, next_fragment_id)] = branch_color
+                G.add_edge(fragment_id, next_fragment_id, label=edge_label, color=branch_color) # Установите атрибуты напрямую    
 
-            G.add_edge(fragment_id, next_fragment_id)
-            edge_labels[(fragment_id, next_fragment_id)] = edge_label
+            
+
+
 
     if not G:
         logger.warning(f"Не удалось построить граф для истории '{story_id}', нет валидных узлов/ребер.")
@@ -6783,20 +7576,13 @@ def generate_story_map(story_id: str, story_data: dict, highlight_ids: set[str] 
                  color='black' # Цвет рамки
                  )
 
-    # Добавляем ребра
-    for node in G.nodes():
-        dot.node(str(node),
-                 label=node_labels[node],
-                 shape='box',
-                 style='filled',
-                 fillcolor=node_colors[node],
-                 color='black',
-                 fontsize='15')  # можно от 10 до 16
 
-    for u, v in G.edges():
+
+    for u, v, key in G.edges(keys=True):
+        edge_data = G.get_edge_data(u, v, key) # Получите данные для этого конкретного ребра
         dot.edge(str(u), str(v),
-                 label=edge_labels.get((u, v), ''),
-                 color=edge_colors.get((u, v), 'grey'),
+                 label=edge_data.get('label', ''), # Получите метку из данных ребра
+                 color=edge_data.get('color', 'grey'), # Получите цвет из данных ребра
                  fontsize='12',
                  fontcolor='darkred')
 
@@ -6949,11 +7735,55 @@ def generate_branch_map(story_id: str, story_data: dict, branch_name: str, highl
 
             try:
                 int_choice = int(choice_text)
-                edge_label_text = f"задержка {int_choice}с"
+                base_label = f"задержка {int_choice} секунд"
             except ValueError:
-                edge_label_text = choice_text[:30] + "..." if len(choice_text) > 30 else choice_text
-            
-            edge_labels[(fragment_id, next_fragment_id)] = edge_label_text
+                base_label = choice_text[:40] + "..." if len(choice_text) > 40 else choice_text
+
+            # Добавляем эффекты, если есть
+            effects = choice.get("effects", [])
+            effects_html_label = ""
+            if isinstance(effects, list) and effects:
+                effect_rows = ""
+                has_check_symbols = False
+                for effect in effects:
+                    if not isinstance(effect, dict):
+                        continue  # защита от мусора
+
+                    stat = effect.get("stat", "???")
+                    value = effect.get("value", "")
+                    hide = effect.get("hide", False)
+
+                    raw_effect_value = str(value)
+                    if any(symbol in raw_effect_value for symbol in ['>', '<', '=']):
+                        has_check_symbols = True
+
+                    safe_effect_name = html.escape(stat)
+                    safe_effect_value = html.escape(raw_effect_value)
+                    if hide:
+                        safe_effect_name = f"<I>{safe_effect_name}</I>"
+
+                    effect_rows += f"<TR><TD ALIGN='LEFT'>{safe_effect_name}: {safe_effect_value}</TD></TR>"
+
+                table_title = "Проверка" if has_check_symbols else "Эффекты"
+                bgcolor = "#e6ccff" if has_check_symbols else "#F0FFF0"
+
+                effects_html_label = f"""<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" BGCOLOR="{bgcolor}">
+                <TR><TD ALIGN='CENTER'><B>{table_title}:</B></TD></TR>
+                {effect_rows}
+                </TABLE>"""
+
+            # Объединяем метку стрелки
+            if effects_html_label:
+                edge_label = f"""<
+                <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="1">
+                  <TR><TD>{html.escape(base_label)}</TD></TR>
+                  <TR><TD>{effects_html_label}</TD></TR>
+                </TABLE>
+                >"""
+            else:
+                edge_label = base_label
+
+            edge_labels[(fragment_id, next_fragment_id)] = edge_label
 
             # Определение цвета ребра
             source_branch_prefix = fragment_id.rsplit('_', 1)[0] if '_' in fragment_id else fragment_id
@@ -7338,42 +8168,286 @@ async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 
+# --- Логика статов ---
+
+
+MAX_ALERT_LENGTH = 200 # Лимит Telegram для show_alert
+
+# --- Новые вспомогательные функции для Firebase (прогресс пользователя в истории) ---
+
+def get_user_progress_ref_path(story_id: str, user_id: int) -> str:
+    """Возвращает путь к данным прогресса пользователя в Firebase."""
+    return f'story_settings/{story_id}/{user_id}'
+
+def load_user_story_progress(story_id: str, user_id: int) -> dict:
+    """Загружает current_effects и fragment_id пользователя для указанной истории."""
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME: # Проверка инициализации Firebase
+            logger.error("Firebase приложение не инициализировано. Невозможно загрузить прогресс пользователя.")
+            return {}
+        ref = db.reference(get_user_progress_ref_path(story_id, user_id))
+        data = ref.get()
+        return data if isinstance(data, dict) else {} # Возвращаем dict, даже если null из Firebase
+    except Exception as e:
+        logger.error(f"Ошибка Firebase при загрузке прогресса пользователя story {story_id}, user {user_id}: {e}")
+        return {}
+
+def save_user_story_progress(story_id: str, user_id: int, progress_data: dict) -> None:
+    """Сохраняет current_effects и fragment_id пользователя для указанной истории."""
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано. Невозможно сохранить прогресс пользователя.")
+            return
+        ref = db.reference(get_user_progress_ref_path(story_id, user_id))
+        ref.set(progress_data)
+    except Exception as e:
+        logger.error(f"Ошибка Firebase при сохранении прогресса пользователя story {story_id}, user {user_id}: {e}")
+
+def clear_user_story_complete_progress(story_id: str, user_id: int) -> None:
+    """Полностью стирает данные прохождения истории (fragment_id, current_effects) для пользователя."""
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано. Невозможно очистить прогресс пользователя.")
+            return
+        ref = db.reference(get_user_progress_ref_path(story_id, user_id))
+        ref.delete()
+        logger.info(f"Полностью очищен прогресс для истории {story_id}, пользователя {user_id}.")
+    except Exception as e:
+        logger.error(f"Ошибка Firebase при полной очистке прогресса пользователя story {story_id}, user {user_id}: {e}")
+
+# --- Новые вспомогательные функции для обработки эффектов ---
+
+def _parse_effect_value(value_str: str) -> Tuple[str, Optional[str], Optional[int]]:
+    """Разбирает строку значения эффекта на (тип_действия, символ_операции, числовое_значение)."""
+    value_str = str(value_str).strip() # Убедимся, что это строка и уберем пробелы
+
+    if value_str.startswith(('+', '-')):
+        op = value_str[0]
+        try:
+            num = int(value_str[1:])
+            return "modify", op, num
+        except ValueError:
+            logger.warning(f"Не удалось разобрать числовую часть значения эффекта modify: {value_str}")
+            return "invalid", None, None
+    elif value_str.startswith(('>', '<', '=')):
+        op = value_str[0]
+        try:
+            num = int(value_str[1:])
+            return "check", op, num
+        except ValueError:
+            logger.warning(f"Не удалось разобрать числовую часть значения эффекта check: {value_str}")
+            return "invalid", None, None
+    else:
+        try:
+            num = int(value_str)
+            return "set", None, num
+        except ValueError:
+            logger.warning(f"Не удалось разобрать значение эффекта set: {value_str}")
+            return "invalid", None, None
+
+async def process_choice_effects_on_click(
+    story_id: str,
+    user_id: int,
+    effects_list: List[Dict[str, Any]],
+    query: Update.callback_query # query передается для немедленного ответа на проверки
+) -> Tuple[bool, str, bool]:
+    """
+    Обрабатывает эффекты при нажатии кнопки выбора.
+    Возвращает: (продолжить_переход, текст_уведомления_об_успехе, сигнал_скрыть_кнопку_при_ошибке)
+    """
+    user_progress = load_user_story_progress(story_id, user_id)
+    current_effects_data = user_progress.get("current_effects", {})
+    # temp_effects_data используется для последовательного применения эффектов внутри одного списка
+    temp_effects_data = dict(current_effects_data) 
+
+    success_alert_parts = [] # Части для сообщения об успешном применении эффектов
+
+    for effect in effects_list:
+        stat_name = effect.get("stat")
+        value_str = effect.get("value", "") # Получаем как есть, _parse_effect_value обработает
+        hide_effect = effect.get("hide", False)
+        logger.info(f"action_type: {value_str}")
+        action_type, op_char, numeric_val = _parse_effect_value(value_str)
+        logger.info(f"action_type: {action_type}")
+        if action_type == "invalid" or not stat_name or numeric_val is None: # Добавлена проверка numeric_val
+            logger.warning(f"Пропуск неверного или неполного эффекта: {effect}")
+            continue
+
+        # Получаем текущее значение стата, учитывая изменения от предыдущих эффектов в ЭТОМ ЖЕ списке
+        current_stat_val_for_effect = temp_effects_data.get(stat_name)
+
+        if action_type == "check":
+            val_for_check = 0 # Значение по умолчанию для проверки, если стат не существует
+            if current_stat_val_for_effect is not None:
+                try:
+                    val_for_check = int(current_stat_val_for_effect)
+                except (ValueError, TypeError): # Если значение стата не числовое
+                    logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_stat_val_for_effect}'. Используется 0 для проверки.")
+                    val_for_check = 0
+            
+            check_passed = False
+            if op_char == '>' and val_for_check > numeric_val: check_passed = True
+            elif op_char == '<' and val_for_check < numeric_val: check_passed = True
+            elif op_char == '=' and val_for_check == numeric_val: check_passed = True
+
+            if not check_passed:
+                if hide_effect:
+                    # Эта кнопка не должна была быть видимой или произошла ошибка. Без уведомления.
+                    return False, "", True # Не продолжать, сигнал, что кнопка должна быть скрыта
+                else:
+                    reason = f"Требование: {stat_name} {op_char}{numeric_val} (тек: {val_for_check})"
+                    if len(reason) > MAX_ALERT_LENGTH: reason = reason[:MAX_ALERT_LENGTH-3]+"..."
+                    await query.answer(text=reason, show_alert=True)
+                    return False, "", False # Не продолжать, без текста успеха, кнопка не "скрываемая ошибка"
+        
+        elif action_type == "set":
+            temp_effects_data[stat_name] = numeric_val
+            user_progress["current_effects"] = temp_effects_data
+            save_user_story_progress(story_id, user_id, user_progress)  # 💾 Сохраняем сразу            
+            if not hide_effect:
+                success_alert_parts.append(f"▫️Вы получили атрибут {stat_name}:{numeric_val}")
+        
+        elif action_type == "modify":
+            base_for_modification = 0 # Значение по умолчанию 1, если стат совершенно новый
+            if current_stat_val_for_effect is not None: # Стат существует (может быть 0 или другое значение)
+                try:
+                    base_for_modification = int(current_stat_val_for_effect)
+                except (ValueError, TypeError): # Если значение стата не числовое
+                    logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_stat_val_for_effect}'. Используется 1 как база для модификации.")
+                    base_for_modification = 1 # Возврат к значению по умолчанию
+            
+            new_val = (base_for_modification + numeric_val) if op_char == '+' else (base_for_modification - numeric_val)
+            temp_effects_data[stat_name] = new_val
+            user_progress["current_effects"] = temp_effects_data
+            save_user_story_progress(story_id, user_id, user_progress)  # 💾 Сохраняем сразу           
+            temp_effects_data[stat_name] = new_val
+            if not hide_effect:
+                action_word = "увеличен" if op_char == '+' else "уменьшен"
+                # abs(numeric_val) для корректного отображения "на X"
+                success_alert_parts.append(f"▫️Ваш атрибут {stat_name} {action_word} на {abs(numeric_val)}")
+
+    # Если все проверки пройдены или не было неуспешных проверок
+    user_progress["current_effects"] = temp_effects_data # Сохраняем накопленные изменения
+    save_user_story_progress(story_id, user_id, user_progress) # Сохраняем в Firebase
+
+    alert_text = ""
+    if success_alert_parts: # Собираем итоговое сообщение
+        alert_text = "\n".join(success_alert_parts)
+        if len(alert_text) > MAX_ALERT_LENGTH:
+            alert_text = alert_text[:MAX_ALERT_LENGTH-3] + "..."
+    
+    return True, alert_text, False # Продолжить, текст уведомления (если есть), не скрываемая ошибка
+
+def evaluate_choice_for_display(
+    story_id: str,
+    user_id: int,
+    effects_list: List[Dict[str, Any]]
+) -> Tuple[bool, str]:
+    """
+    Оценивает эффекты выбора для отображения кнопки (видимость и текст требований).
+    Возвращает: (видна_ли_кнопка, текст_требований_для_кнопки)
+    """
+    user_progress = load_user_story_progress(story_id, user_id)
+    current_effects_data = user_progress.get("current_effects", {})
+    requirement_parts = [] # Части для текста требований (например, "интеллект > 5")
+
+    for effect in effects_list:
+        stat_name = effect.get("stat")
+        value_str = effect.get("value", "")
+        hide_effect = effect.get("hide", False)
+
+        action_type, op_char, numeric_val = _parse_effect_value(value_str)
+
+        if action_type == "invalid" or not stat_name or numeric_val is None: continue
+
+        if action_type == "check":
+            current_stat_val = current_effects_data.get(stat_name)
+            val_for_check = 0 # Значение по умолчанию для проверки, если стат не существует
+            if current_stat_val is not None:
+                try:
+                    val_for_check = int(current_stat_val)
+                except (ValueError, TypeError):
+                    val_for_check = 0
+            
+            check_passed = False
+            if op_char == '>' and val_for_check > numeric_val: check_passed = True
+            elif op_char == '<' and val_for_check < numeric_val: check_passed = True
+            elif op_char == '=' and val_for_check == numeric_val: check_passed = True
+
+            if not check_passed and hide_effect:
+                return False, "" # Кнопка должна быть полностью скрыта
+
+            if not hide_effect: # Добавляем к отображаемому тексту для нескрытых проверок
+                requirement_parts.append(f"{stat_name} {op_char}{numeric_val}")
+    
+    req_text = f" ({', '.join(requirement_parts)})" if requirement_parts else ""
+    return True, req_text
 
 
 
-
-
+def apply_effect_values(base_text, effects_dict):
+    def replacer(match):
+        key = match.group(1).strip().lower()
+        value = effects_dict.get(key)
+        if value is not None:
+            return f"{key}:{value}"
+        else:
+            return f"{key}:не найдено"
+    
+    return re.sub(r"\{\{(.*?)\}\}", replacer, base_text)
 # --- Логика создания истории (ConversationHandler) ---
 
 async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     message = query.message
+    actual_user_id = query.from_user.id # ID пользователя, который нажал кнопку
 
-    logger.info(f"show_story_fragment called by query: {query.data}")
-
+    logger.info(f"show_story_fragment вызвана query: {query.data} от пользователя {actual_user_id}")
+    logger.info(f"Получен callback_query с данными: {Update}")
     data_parts = query.data.split("_", 3)
-    if len(data_parts) == 4:
-        _, user_id_str, story_id_from_data, fragment_id = data_parts
+    logger.info(f"Разобранные data_parts: {data_parts}")
 
-        chat_type = message.chat.type
-        user_id_actual = query.from_user.id
+    user_id_from_callback_str: Optional[str] = None
+    story_id_from_data: str
+    target_fragment_id: str # ID фрагмента, НА КОТОРЫЙ ведет кнопка
 
-        if chat_type in ("group", "supergroup") and int(user_id_str) != user_id_actual:
-            await query.answer(
-                text="⚠️ Данная история вызвана не вами. Используйте кнопку \"Перейти к запуску истории\" чтобы создать своё окно для прохождения этой истории.", 
-                show_alert=True
-            )
-            return
-    elif len(data_parts) == 3:
-        _, story_id_from_data, fragment_id = data_parts
+
+
+    if len(data_parts) == 4: # Формат: play_UID_STORYID_FRAGMENTID
+        _, user_id_from_callback_str, story_id_from_data, target_fragment_id = data_parts
+    elif len(data_parts) == 3: # Формат: play_STORYID_FRAGMENTID (для приватных чатов)
+        _, story_id_from_data, target_fragment_id = data_parts
     else:
+        logger.error(f"Ошибка формата callback_data: {query.data}")
         await context.bot.send_message(chat_id=message.chat.id, text="Ошибка формата данных для колбэка.")
         return
 
+
+    original_target_fragment_id = target_fragment_id
+    target_fragment_id_cleaned = re.sub(r'id\d+$', '', target_fragment_id)
+
+    # Проверка для групповых чатов
+    if message.chat.type in ("group", "supergroup"):
+        if user_id_from_callback_str and int(user_id_from_callback_str) != actual_user_id:
+            await query.answer(
+                text="⚠️ Данная история вызвана не вами. Используйте кнопку \"Перейти к запуску истории\" чтобы создать своё окно для прохождения этой истории.",
+                show_alert=True
+            )
+            username_display = query.from_user.first_name or "Пользователь"
+            story_info = f"📖 История *{story_id_from_data}* ожидает запуска."
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶️ Играть", callback_data=f"play_{actual_user_id}_{story_id_from_data}_main_1")]
+            ])
+            await query.message.reply_text(
+                f"🎮 Запуск истории готов для пользователя: {username_display}.\n\n{story_info}\n\nНажмите кнопку ниже, чтобы начать играть:",
+                reply_markup=keyboard,
+                parse_mode="Markdown" # Используйте ParseMode.MARKDOWN_V2 если предпочитаете
+            )
+            return
+
     user_id = query.from_user.id
     chat_id = message.chat.id
-    logger.info(f"User {user_id} in chat {chat_id} chose fragment {fragment_id} for story {story_id_from_data}")
-    await query.answer()
+
     # --- Отмена активных задач для этой истории и чата ---
     # Отмена таймера авто-перехода
     auto_timer_key = f"{user_id}_{story_id_from_data}_{chat_id}"
@@ -7391,49 +8465,145 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data.pop(f"auto_path_{user_id}_{story_id_from_data}_{chat_id}", None)
 
-    story_data_found = load_user_story(user_id, story_id_from_data)
+
+    # --- Загрузка определения истории ---
+    story_data_found = load_user_story(actual_user_id, story_id_from_data)
     if not story_data_found:
         story_data_found = load_story_by_id_fallback(story_id_from_data)
-
+    
     if not story_data_found:
-        logging.info(f"История {story_id_from_data} не найдена даже через fallback.")  
+        logging.info(f"История {story_id_from_data} не найдена даже через fallback.")
+        await query.answer("История не найдена.", show_alert=True) # Отвечаем на query
+        return
 
     story_owner_id = get_owner_id(story_id_from_data, story_data_found)
 
-    fragments = story_data_found.setdefault("fragments", {})
-    fragment_data = fragments.get(fragment_id)
 
-    if not fragment_data:
-        if story_data_found.get("neuro_fragments", False):
-            logger.info(f"Создаём пустой нейро-фрагмент '{fragment_id}' для истории {story_id_from_data}")
-            fragments[fragment_id] = {
-                "text": "",
-                "media": [],
-                "choices": []
-            }
 
-            save_story_data(str(story_owner_id), story_id_from_data, story_data_found)  # не забудь сохранить изменения
-            fragment_data = fragments[fragment_id]
+
+    # --- Обработка эффектов и прогресса пользователя ---
+    alert_after_effects_processed_text = "" # Сообщение для query.answer после успешной обработки
+
+    if target_fragment_id_cleaned == "main_1":
+        clear_user_story_complete_progress(story_id_from_data, actual_user_id)
+        logger.info(f"Пользователь {actual_user_id} начал/перезапустил историю {story_id_from_data} с main_1. Прогресс очищен.")
+        # Для main_1 нет эффектов от *выбора*, т.к. это действие сброса.
+        # Уведомление query.answer() не требуется для самого сброса, если только нет спец. сообщения.
+        await query.answer() # Просто подтвердить нажатие кнопки main_1
+    else:
+        # Это нажатие на обычную кнопку выбора, не "начать историю".
+        # Эффекты определены в выборе внутри *исходного* фрагмента.
+        user_progress_before_click = load_user_story_progress(story_id_from_data, actual_user_id)
+        source_fragment_id = user_progress_before_click.get("fragment_id")
+
+        if source_fragment_id:
+            source_fragment_data = story_data_found.get("fragments", {}).get(source_fragment_id)
+            logger.info(f"source_fragment_data: {source_fragment_data}")
+            if source_fragment_data:
+                effects_to_apply_for_choice = []
+                
+                # Шаг 1: Удаляем суффикс idX, если он есть
+                match = re.match(r"^(.*?)(?:id(\d+))?$", original_target_fragment_id)
+                if match:
+                    base_target_id = match.group(1)
+                    suffix_index = int(match.group(2)) if match.group(2) is not None else 0
+                else:
+                    base_target_id = original_target_fragment_id
+                    suffix_index = 0
+                
+                logger.info(f"Base target id: {base_target_id}, suffix index: {suffix_index}")
+                
+                # Шаг 2: Считаем совпадения target == base_target_id и ищем нужное по порядку
+                count = 0
+                for choice_in_source in source_fragment_data.get("choices", []):
+                    if choice_in_source.get("target") == base_target_id:
+                        if count == suffix_index:
+                            effects_to_apply_for_choice = choice_in_source.get("effects", [])
+                            logger.info(f"effects_to_apply_for_choice: {effects_to_apply_for_choice}")
+                            break
+                        count += 1
+                
+                if effects_to_apply_for_choice:
+                    proceed, alert_text_success, hide_button_signal = await process_choice_effects_on_click(
+                        story_id_from_data,
+                        actual_user_id,
+                        effects_to_apply_for_choice,
+                        query
+                    )
+                    if not proceed:
+                        return
+                    alert_after_effects_processed_text = alert_text_success
+                else:
+                    await query.answer()
+            else:
+                logger.warning(f"Исходный фрагмент {source_fragment_id} не найден в данных истории {story_id_from_data}.")
+                await query.answer("Ошибка: предыдущий фрагмент не найден.", show_alert=True)
+                return
         else:
-            await context.bot.send_message(chat_id=message.chat.id, text="Фрагмент не найден (из show_story_fragment).")
+            logger.info(f"Нет source_fragment_id в прогрессе пользователя для истории {story_id_from_data}, пользователь {actual_user_id}. Эффекты выбора не обработаны.")
+            await query.answer()
+
+
+
+    # Если есть текст уведомления после успешной обработки эффектов, показываем его.
+    # Это произойдет, если target_fragment_id != "main_1" и были успешно применены видимые эффекты.
+    if alert_after_effects_processed_text:
+        await query.answer(text=alert_after_effects_processed_text, show_alert=True)
+    elif target_fragment_id_cleaned != "main_1" and not source_fragment_id : # если не main_1, но и не смогли обработать эффекты
+        pass # query.answer() был вызван ранее, или не требуется
+
+    # Обновляем fragment_id пользователя в Firebase на target_fragment_id
+    # Это происходит ПОСЛЕ успешной обработки эффектов, или если это main_1.
+    # Для main_1 это восстанавливает fragment_id после clear_user_story_complete_progress.
+    current_progress_after_effects = load_user_story_progress(story_id_from_data, actual_user_id) # Перезагружаем свежие данные
+    logger.info(f"current_progress_after_effects {current_progress_after_effects}")    
+    current_progress_after_effects["fragment_id"] = target_fragment_id_cleaned
+    save_user_story_progress(story_id_from_data, actual_user_id, current_progress_after_effects)
+    logger.info(f"Пользователь {target_fragment_id_cleaned} теперь на фрагменте {target_fragment_id_cleaned} в истории {story_id_from_data}.")
+
+
+
+
+
+
+
+
+    # --- Загрузка и подготовка контента для *целевого* фрагмента ---
+    fragments_dict = story_data_found.setdefault("fragments", {})
+    target_fragment_data = fragments_dict.get(target_fragment_id_cleaned)
+
+    if not target_fragment_data:
+        if story_data_found.get("neuro_fragments", False): # Обработка нейро-фрагментов
+            logger.info(f"Создание пустого нейро-фрагмента '{target_fragment_id_cleaned}' для истории {story_id_from_data}")
+            fragments_dict[target_fragment_id_cleaned] = {"text": "", "media": [], "choices": []}
+            save_story_data(str(story_owner_id), story_id_from_data, story_data_found) # Сохраняем обновленную структуру истории
+            target_fragment_data = fragments_dict[target_fragment_id_cleaned]
+        else:
+            logger.error(f"Целевой фрагмент '{target_fragment_id_cleaned}' не найден и не является нейро-фрагментом.")
+            # Ответ пользователю уже был дан через query.answer() ранее, если это была ошибка эффектов
+            # Если это новая ошибка (фрагмент просто отсутствует), то:
+            await context.bot.send_message(chat_id=message.chat.id, text=f"Фрагмент '{target_fragment_id_cleaned}' не найден.")
             return
 
-    fragment_text_content = fragment_data.get("text", "")
+    fragment_text_content = target_fragment_data.get("text", "")
+    # base_text_for_display и edit_steps как в вашем коде
     base_text_for_display = re.split(r"(\[\[[-+]\d+\]\]|\(\([-+]\d+\)\))", fragment_text_content, 1)[0].strip()
+    current_effects = current_progress_after_effects.get("current_effects", {})
+    base_text_for_display = apply_effect_values(base_text_for_display, current_effects)    
     edit_steps = parse_timed_edits(fragment_text_content)
 
     await render_fragment(
         context=context,
-        user_id=user_id,        
-        owner_id=story_owner_id,
+        user_id=actual_user_id,
+        owner_id=story_owner_id, 
         story_id=story_id_from_data,
-        fragment_id=fragment_id,
+        fragment_id=target_fragment_id_cleaned, # Рендерим целевой фрагмент
         message_to_update=message,
-        story_data=story_data_found,
-        chat_id=chat_id,
-        current_auto_path=[], # Новый путь, т.к. это действие пользователя
-        base_text_for_display=base_text_for_display, # Новый параметр
-        edit_steps_for_text=edit_steps              # Новый параметр
+        story_data=story_data_found, 
+        chat_id=message.chat.id,
+        current_auto_path=[], 
+        base_text_for_display=base_text_for_display,
+        edit_steps_for_text=edit_steps
     )
 
 
@@ -7485,9 +8655,14 @@ async def render_fragment(
     )
 
     fragment = story_data.get("fragments", {}).get(fragment_id)
-    if not base_text_for_display:
-        base_text_for_display = fragment.get("text", "") if fragment else ""
     neuro_mode = story_data.get("neuro_fragments", False)
+
+    # Если base_text_for_display пуст, пытаемся его получить из фрагмента (может быть полезно при прямом вызове render_fragment)
+    if not base_text_for_display and fragment:
+         raw_text = fragment.get("text", "")
+         base_text_for_display = re.split(r"(\[\[[-+]\d+\]\]|\(\([-+]\d+\)\))", raw_text, 1)[0].strip()
+         if not edit_steps_for_text and raw_text: # Пересчитываем edit_steps, если текст изменился
+             edit_steps_for_text = parse_timed_edits(raw_text)
 
     if not fragment or (not fragment.get("text") and not fragment.get("media")):
         if neuro_mode:
@@ -7608,10 +8783,97 @@ async def render_fragment(
                 await context.bot.send_message(chat_id, error_text)
             return
 
+
+
+
+
+    # --- Подготовка кнопок и оценка эффектов для отображения ---
+    choices_data = fragment.get("choices", []) if fragment else []
+    inline_buttons = []
+    auto_transition_timer_delay = float('inf')
+    auto_transition_target_fragment_id = None
+    visible_button_count = 0
+
+
+    target_counter = defaultdict(int)
+
+    for i, choice in enumerate(choices_data):
+        text = choice.get("text")
+        target = choice.get("target")
+        effects = choice.get("effects", [])
+        
+        # Пропускаем авто-переходы
+        try:
+            delay = float(text)
+            if 0 < delay < auto_transition_timer_delay:
+                auto_transition_timer_delay = delay
+                auto_transition_target_fragment_id = target
+            continue
+        except (ValueError, TypeError):
+            pass
+
+        # Оцениваем видимость кнопки
+        is_button_visible, requirement_text = evaluate_choice_for_display(
+            story_id,
+            user_id,
+            effects
+        )
+        if not is_button_visible:
+            continue
+
+        # Считаем, сколько раз этот target уже встречался
+        count = target_counter[target]
+        target_counter[target] += 1
+
+        # Добавляем #N, если выбор не уникален
+        if count > 0:
+            target_with_index = f"{target}id{count}"
+        else:
+            target_with_index = target
+        logger.info(f"target_with_index: {target_with_index}")
+        button_display_text = text + requirement_text
+        button_callback_data = f"play_{user_id}_{story_id}_{target_with_index}"
+        inline_buttons.append([InlineKeyboardButton(button_display_text, callback_data=button_callback_data)])
+        visible_button_count += 1
+    
+    reply_markup = InlineKeyboardMarkup(inline_buttons) if inline_buttons else None
+
+    # --- Логика "тупика" ---
+    # Используем временный список для частей текста, чтобы избежать частых конкатенаций строк
+    current_display_text_parts = [base_text_for_display if base_text_for_display else ""] # Убедимся, что base_text_for_display не None
+
+    if choices_data and visible_button_count == 0 and not auto_transition_target_fragment_id:
+        if not neuro_mode: # Предполагаем, что в нейро-режиме тупиков быть не должно, или они обрабатываются иначе
+            dead_end_suffix = "\n\n(похоже вы зашли в тупик)"
+            current_display_text_parts.append(dead_end_suffix)
+
+    final_base_text_for_display = "".join(current_display_text_parts)
+    
+    # Проверка длины (особенно для caption медиа) должна выполняться непосредственно перед отправкой/редактированием.
+    # final_base_text_for_display будет использоваться ниже.
+
+    # --- Очистка предыдущих сообщений (существующая логика из вашего кода) ---
+    last_messages_key = f"last_story_messages_{user_id}_{story_id}_{chat_id}"
+    previous_message_ids = context.user_data.pop(last_messages_key, [])
+    message_id_to_keep_for_editing = message_to_update.message_id if message_to_update else None
+    
+    for mid in previous_message_ids:
+        if mid == message_id_to_keep_for_editing:
+            continue
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except (BadRequest, TelegramError):
+            logger.warning(f"Не удалось удалить старое сообщение {mid} для user {user_id}, chat {chat_id}.")
+        except Exception as e: # Более общая ошибка
+            logger.error(f"Неожиданная ошибка при удалении сообщения {mid}: {e}", exc_info=True)
+
+
+
+
+
     # text_content больше не используется напрямую для отображения, используем base_text_for_display
     # fragment.get("text", "") все еще нужен для parse_timed_edits, но это делается в show_story_fragment
     media_content = fragment.get("media", [])
-    choices_data = fragment.get("choices", [])
 
     # --- 1. Очистка предыдущих сообщений ---
     last_messages_key = f"last_story_messages_{user_id}_{story_id}_{chat_id}"
@@ -7628,22 +8890,6 @@ async def render_fragment(
         except Exception as e:
             logger.error(f"Unexpected error deleting message {mid}: {e}", exc_info=True)
 
-    # --- 2. Подготовка кнопок и определение авто-перехода ---
-    inline_buttons = []
-    auto_transition_timer_delay = float('inf')
-    auto_transition_target_fragment_id = None
-    for choice in choices_data:
-        text = choice.get("text")
-        target = choice.get("target")
-        try:
-            delay = float(text)
-            if 0 < delay < auto_transition_timer_delay:
-                auto_transition_timer_delay = delay
-                auto_transition_target_fragment_id = target
-        except (ValueError, TypeError):
-            if text and target:
-                button_callback_data = f"play_{user_id}_{story_id}_{target}"
-                inline_buttons.append([InlineKeyboardButton(text, callback_data=button_callback_data)])
     
     reply_markup = InlineKeyboardMarkup(inline_buttons) if inline_buttons else None
 
@@ -7682,7 +8928,7 @@ async def render_fragment(
                     spoiler = m_item.get("spoiler", False) # Убедимся, что есть значение по умолчанию
                     
                     # base_text_for_display используется для caption первого элемента
-                    caption_for_item = base_text_for_display if i == 0 and base_text_for_display else None
+                    caption_for_item = final_base_text_for_display if i == 0 and final_base_text_for_display else None
                     
                     if m_type == "photo":
                         media_group_to_send.append(InputMediaPhoto(media=file_id, caption=caption_for_item, parse_mode=ParseMode.HTML if caption_for_item else None, has_spoiler=spoiler))
@@ -7719,7 +8965,7 @@ async def render_fragment(
                 if message_to_update:
                     # Попытка отредактировать медиа (если тип совпадает и есть file_id)
                     input_media_for_edit = None
-                    current_caption = base_text_for_display if base_text_for_display else None
+                    current_caption = final_base_text_for_display if final_base_text_for_display else None
                     if media_type == "photo" and message_to_update.photo:
                         input_media_for_edit = InputMediaPhoto(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, has_spoiler=spoiler)
                     elif media_type == "video" and message_to_update.video:
@@ -7749,7 +8995,7 @@ async def render_fragment(
                         except (BadRequest, TelegramError): pass
                     
                     # Отправляем новое медиа
-                    caption_to_send = base_text_for_display if base_text_for_display else None
+                    caption_to_send = final_base_text_for_display if final_base_text_for_display else None
                     if media_type == "photo":
                         newly_sent_message_object = await context.bot.send_photo(chat_id, photo=file_id, caption=caption_to_send, parse_mode=ParseMode.HTML if caption_to_send else None, reply_markup=reply_markup, has_spoiler=spoiler)
                     elif media_type == "video":
@@ -7759,12 +9005,12 @@ async def render_fragment(
                     elif media_type == "audio":
                         newly_sent_message_object = await context.bot.send_audio(chat_id, audio=file_id, caption=caption_to_send, parse_mode=ParseMode.HTML if caption_to_send else None, reply_markup=reply_markup)
                     else:
-                        newly_sent_message_object = await context.bot.send_message(chat_id, f"{base_text_for_display}\n(Медиа не поддерживается или ошибка)", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+                        newly_sent_message_object = await context.bot.send_message(chat_id, f"{final_base_text_for_display}\n(Медиа не поддерживается или ошибка)", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             
             if newly_sent_message_object and newly_sent_message_object.message_id not in final_message_ids_sent : # если это не медиагруппа, где уже добавили
                  final_message_ids_sent.append(newly_sent_message_object.message_id)
 
-        elif base_text_for_display: # Только текст
+        elif final_base_text_for_display: # Только текст
             can_edit_text = False
             if message_to_update and (message_to_update.text is not None or message_to_update.caption is not None): # Можно редактировать если есть текст ИЛИ caption
                  # Если у message_to_update было медиа, edit_text не сработает. Нужно edit_caption.
@@ -7772,7 +9018,7 @@ async def render_fragment(
                  # Однако, если старое было медиа, а новое - текст, то старое надо удалить.
                 if message_to_update.text is not None: # Только если старое сообщение текстовое
                     try:
-                        newly_sent_message_object = await message_to_update.edit_text(base_text_for_display, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+                        newly_sent_message_object = await message_to_update.edit_text(final_base_text_for_display, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
                         can_edit_text = True
                     except BadRequest:
                         can_edit_text = False
@@ -7782,16 +9028,26 @@ async def render_fragment(
                 if message_to_update:
                     try: await context.bot.delete_message(chat_id, message_to_update.message_id)
                     except (BadRequest, TelegramError): pass
-                newly_sent_message_object = await context.bot.send_message(chat_id, base_text_for_display, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+                newly_sent_message_object = await context.bot.send_message(chat_id, final_base_text_for_display, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             
             if newly_sent_message_object: final_message_ids_sent.append(newly_sent_message_object.message_id)
 
-        elif reply_markup: # Только кнопки (текст и медиа пустые)
-            if message_to_update:
-                 try: await context.bot.delete_message(chat_id, message_to_update.message_id)
-                 except (BadRequest, TelegramError): pass
-            newly_sent_message_object = await context.bot.send_message(chat_id, "Выберите действие:", reply_markup=reply_markup) # Заглушка
-            if newly_sent_message_object: final_message_ids_sent.append(newly_sent_message_object.message_id)
+        elif reply_markup: # Нет текста, нет медиа, но есть кнопки (например, фрагмент только с выбором)
+            placeholder_text = "Выберите действие:" # Или другой подходящий текст
+            if message_to_update: 
+                try: 
+                    # Если у старого сообщения был текст/медиа, лучше удалить и отправить новое только с кнопками
+                    if message_to_update.text or message_to_update.photo or message_to_update.video or message_to_update.animation:
+                        await message_to_update.delete()
+                        newly_sent_message_object = await context.bot.send_message(chat_id, text=placeholder_text, reply_markup=reply_markup)
+                    else: # Если старое сообщение тоже было только с кнопками (или пустое)
+                        newly_sent_message_object = await message_to_update.edit_text(text=placeholder_text, reply_markup=reply_markup) # или edit_reply_markup
+                except (BadRequest, TelegramError): 
+                    try: await message_to_update.delete() # Попытка удалить если редактирование не удалось
+                    except (BadRequest, TelegramError): pass
+                    newly_sent_message_object = await context.bot.send_message(chat_id, text=placeholder_text, reply_markup=reply_markup)
+            else:
+                newly_sent_message_object = await context.bot.send_message(chat_id, text=placeholder_text, reply_markup=reply_markup)
         
         else: # Пустой фрагмент
             empty_text = "Фрагмент пуст."
@@ -7830,7 +9086,7 @@ async def render_fragment(
 
             # base_text_for_display уже является текстом без тегов [[...]]
             # run_timed_edits должен использовать его как основу
-            text_for_timed_run = base_text_for_display
+            text_for_timed_run = final_base_text_for_display
 
             logger.info(f"Scheduling timed_edits for msg {message_to_apply_timed_edits.message_id} with key {edit_task_key}. is_caption={is_caption_edit}")
             active_edit_tasks[edit_task_key] = asyncio.create_task(
@@ -8521,6 +9777,7 @@ async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Нет сообщений для удаления.")
 
 
+
 def main() -> None:
     """Запуск бота."""
 
@@ -8668,7 +9925,7 @@ def main() -> None:
     application.add_handler(CommandHandler("nstory", handle_nstory_command))    
     application.add_handler(CommandHandler("nd", delete_last)) 
     application.add_handler(CommandHandler("help", mainhelp_callback))  
-
+    application.add_handler(CallbackQueryHandler(linkhelp_callback, pattern='^linkhelp$'))
     # Добавление пользователя
     application.add_handler(CallbackQueryHandler(handle_coop_add, pattern=r"^coop_add_"))
 
@@ -8694,7 +9951,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^page_info_\d+_[\w-]+$'))         
     application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^e_f_[\w]+_[\w\.-]+$'))      
     application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^show_map_[\w-]+$')) 
-    application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^mapreq_[\w-]+$'))      
+    application.add_handler(CallbackQueryHandler(button_handler, pattern=r'^mapreq_[\w-]+$'))     
     application.add_handler(CallbackQueryHandler(delete_message_callback, pattern="^delete_this_message$"))
     application.add_handler(CallbackQueryHandler(confirm_delete_story, pattern=r"^delete_story_\d+_.+"))
     application.add_handler(CallbackQueryHandler(delete_story_confirmed, pattern=r"^confirm_delete$"))    
@@ -8710,9 +9967,11 @@ def main() -> None:
     # Запуск бота
     application.add_handler(CallbackQueryHandler(handle_neuralstart_story_callback, pattern=r"^nstartstory_[\w\d]+_[\w\d]+$"))
     application.add_handler(CommandHandler("restart", restart)) 
-
+    application.add_handler(CommandHandler("delete", delete_inline_stories))
     # ⬇️ Важно: обработчик любого текста вне диалога, вызывает start
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
+
+
     keep_alive()#запускаем flask-сервер в отдельном потоке. Подробнее ниже...
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
