@@ -673,7 +673,7 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
             votes_data = story_state_data['poll_details']['votes']
             if isinstance(votes_data, dict):
                 story_state_data['poll_details']['votes'] = {
-                    str(idx): list(user_set)
+                    str(idx): list(user_set) if user_set is not None else []
                     for idx, user_set in votes_data.items()
                 }
         if 'voted_users' in story_state_data['poll_details'] and isinstance(story_state_data['poll_details']['voted_users'], set):
@@ -681,6 +681,7 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
 
     logger.info(f"Saving to Firebase for {inline_message_id}: {story_state_data}")
     ref.set(story_state_data)
+
 
 def update_user_attributes(inline_message_id: str, user_attributes: dict):
     """
@@ -945,13 +946,20 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
         required_votes_for_poll = story_state_from_firebase.get("required_votes_to_win")
         if "poll_details" in story_state_from_firebase and story_state_from_firebase.get("current_fragment_id") == fragment_id:
             poll_details_fb = story_state_from_firebase["poll_details"]
+            raw_votes = poll_details_fb.get("votes", {})
+            if isinstance(raw_votes, dict):
+                votes = {int(k): v_set for k, v_set in raw_votes.items()}
+            elif isinstance(raw_votes, list):
+                votes = {i: v_set for i, v_set in enumerate(raw_votes)}
+            else:
+                votes = {}            
             current_poll_data_from_bot_data = {
                 "type": "poll",
                 "target_user_id": story_state_from_firebase["target_user_id"],
                 "story_id": story_state_from_firebase["story_id"],
                 "current_fragment_id": story_state_from_firebase["current_fragment_id"],
                 "choices_data": poll_details_fb.get("choices_data", []),
-                "votes": {int(k): v_set for k, v_set in poll_details_fb.get("votes", {}).items()},
+                "votes": votes,
                 "voted_users": poll_details_fb.get("voted_users", set()),
                 "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
                 "user_attributes": user_attributes,
@@ -1350,14 +1358,21 @@ async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str,
 
     if winning_effects:
         try:
-            proceed, alert_text, needs_retry, story_state = await process_choice_effects_to_user_attributes(
+            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            # Эта функция должна возвращать обновленное состояние, включая атрибуты.
+            # Убедимся, что она это делает и мы правильно сохраняем результат.
+            proceed, alert_text, needs_retry, updated_story_state = await process_choice_effects_to_user_attributes(
                 inline_message_id=inline_message_id,
                 user_id=int(target_user_id),
                 effects_list=winning_effects,
                 context=context
             )
+            story_state = updated_story_state # Сохраняем для дальнейшего использования
+            
+            # Немедленно обновляем user_attributes в bot_data, чтобы display_fragment_for_interaction их увидел.
             if story_state and "user_attributes" in story_state:
                 context.bot_data.setdefault(inline_message_id, {})["user_attributes"] = story_state["user_attributes"]
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
         except Exception as e:
             logger.error(f"Error applying effects for {inline_message_id}: {e}", exc_info=True)
             alert_text = "Произошла внутренняя ошибка при применении эффектов."
@@ -1501,7 +1516,7 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
                 "votes": votes_dict,  # Приводим ключи к int
                 "voted_users": poll_details_fb.get("voted_users", set()),
                 "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
-                "user_attributes":story_state_from_firebase["user_attributes"],
+                "user_attributes": story_state_from_firebase.get("user_attributes", {}),
             }
 
             # Убедимся, что fragment тот же, только теперь с новым poll_data
@@ -1527,11 +1542,33 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
             await query.answer("Некорректный вариант выбора.", show_alert=True)
             logger.warning(f"Invalid choice_idx {choice_idx} for poll {query.inline_message_id}")
             return
+        votes = poll_data.get("votes")
 
+        if not isinstance(votes, dict):
+            if isinstance(votes, list):
+                votes = {
+                    idx: set(user_ids if isinstance(user_ids, list) else [user_ids])
+                    for idx, user_ids in enumerate(votes)
+                }
+            else:
+                votes = {}
+        else:
+            # Приводим все значения к set
+            votes = {
+                idx: set(user_ids if isinstance(user_ids, (list, set)) else [user_ids])
+                for idx, user_ids in votes.items()
+            }
 
-        poll_data["votes"].setdefault(choice_idx, set()).add(user_id) # Убедимся, что ключ существует
+        poll_data["votes"] = votes
+
+        # Обновляем голоса
+        poll_data["votes"].setdefault(choice_idx, set()).add(user_id)
+
+        # Убедимся, что voted_users — это множество
+        if not isinstance(poll_data.get("voted_users"), set):
+            poll_data["voted_users"] = set(poll_data.get("voted_users", []))
+
         poll_data["voted_users"].add(user_id)
-        
         # Сохраняем обновленное состояние голосования в Firebase
         # Формируем данные для сохранения, включая poll_details
         firebase_save_data = {
@@ -1561,17 +1598,19 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
             await end_poll_and_proceed(context, query.inline_message_id, choice_idx, poll_data)
             return 
 
-        await query.answer("Ваш голос принят!")
-        
-        new_keyboard = []
-        for idx, choice_info in enumerate(poll_data["choices_data"]):
-            num_votes = len(poll_data["votes"].get(idx, set()))
-            new_keyboard.append([InlineKeyboardButton(
-                f"({num_votes}/{required_votes_to_win}) {choice_info['text']}",
-                callback_data=f"vote_{query.inline_message_id}_{idx}"
-            )])
-        
-        await context.bot.edit_message_reply_markup(inline_message_id=query.inline_message_id, reply_markup=InlineKeyboardMarkup(new_keyboard))
+        if num_votes_for_current_choice < required_votes_to_win:
+            await query.answer("Ваш голос принят!")
+            
+            # Просто вызываем основную функцию для перерисовки. 
+            # Она сама возьмет актуальные данные из context.bot_data/Firebase
+            # и применит всю логику проверок.
+            await display_fragment_for_interaction(
+                context, 
+                inline_message_id=query.inline_message_id, 
+                target_user_id_str=poll_data["target_user_id"], 
+                story_id=poll_data["story_id"], 
+                fragment_id=poll_data["current_fragment_id"]
+            )
     
     except ValueError: # например, при int(choice_idx_str)
         await query.answer("Неверный выбор (ошибка значения).", show_alert=True)
