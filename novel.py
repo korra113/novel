@@ -2663,6 +2663,24 @@ def get_fragments_for_deletion_preview(
 
 
 
+from html.parser import HTMLParser
+
+class HTMLTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.result = []
+
+    def handle_data(self, d):
+        self.result.append(d)
+
+    def get_text(self):
+        return ''.join(self.result)
+
+def strip_html_tags(text: str) -> str:
+    parser = HTMLTextExtractor()
+    parser.feed(text)
+    return parser.get_text()
+
 
 def build_legend_text(story_data: dict, fragment_ids: list[str]) -> str:
     MEDIA_TYPES_RUS = {
@@ -2700,11 +2718,14 @@ def build_legend_text(story_data: dict, fragment_ids: list[str]) -> str:
         text = fragment.get("text", "")
         # logger.info(f"text '{text}'") # Закомментировано, если не используется
         if text:
-            line_parts.append(f"«{text[:25]}»" + ("…" if len(text) > 30 else ""))
+            clean_text = strip_html_tags(text)
+            line_parts.append(f"«{clean_text[:25]}»" + ("…" if len(clean_text) > 30 else ""))
+
 
         lines.append(" ".join(line_parts))
 
     return "\n".join(lines) if lines else ""
+
 
 
 def build_fragment_action_keyboard(
