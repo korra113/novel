@@ -800,6 +800,7 @@ async def process_choice_effects_to_user_attributes(
     context: Optional[CallbackContext] = None
 ) -> Tuple[bool, str, bool, Dict[str, Any]]:
     """
+    Обрабатывает эффекты в порядке их следования, применяя модификации и проверки последовательно.
     Возвращает: (proceed, alert_text, needs_retry, story_state)
     """
     story_state = load_story_state_from_firebase(inline_message_id)
@@ -807,91 +808,67 @@ async def process_choice_effects_to_user_attributes(
     temp_user_attr = dict(user_attr)
 
     success_alert_parts = []
-    
-    # Разделяем эффекты на модификации и проверки
-    modifications = [e for e in effects_list if _parse_effect_value(e.get("value", ""))[0] in ["set", "modify"]]
-    checks = [e for e in effects_list if _parse_effect_value(e.get("value", ""))[0] == "check"]
-
-    # 1. Применяем все модификации атрибутов
-    if modifications:
-        for effect in modifications:
-            stat_name = effect.get("stat")
-            value_str = effect.get("value", "")
-            hide_effect = effect.get("hide", False)
-            action_type, op_char, numeric_val = _parse_effect_value(value_str)
-
-            if action_type == "invalid" or not stat_name or numeric_val is None:
-                logger.warning(f"Пропуск некорректного модифицирующего эффекта: {effect}")
-                continue
-            
-            current_value = temp_user_attr.get(stat_name)
-
-            if action_type == "set":
-                temp_user_attr[stat_name] = numeric_val
-                if not hide_effect:
-                    success_alert_parts.append(f"▫️Вы получили атрибут {stat_name}: {numeric_val}")
-            
-            elif action_type == "modify":
-                base_val = 0
-                try:
-                    base_val = int(current_value)
-                except (ValueError, TypeError):
-                    logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_value}'. Используется 0.")
-                
-                new_val = base_val + numeric_val if op_char == '+' else base_val - numeric_val
-                temp_user_attr[stat_name] = new_val
-                if not hide_effect:
-                    word = "увеличен" if op_char == '+' else "уменьшен"
-                    success_alert_parts.append(f"▫️Атрибут {stat_name} {word} на {abs(numeric_val)}")
-
-        # Сохраняем измененные атрибуты до выполнения проверок
-        story_state["user_attributes"] = temp_user_attr
-        save_story_state_to_firebase(inline_message_id, story_state)
-        if context and inline_message_id:
-            context.bot_data.setdefault(inline_message_id, {})["user_attributes"] = temp_user_attr
-
-    # 2. Выполняем все проверки
     failure_reasons = []
-    if checks:
-        for effect in checks:
-            stat_name = effect.get("stat")
-            value_str = effect.get("value", "")
-            action_type, op_char, numeric_val = _parse_effect_value(value_str)
 
-            if action_type == "invalid" or not stat_name or numeric_val is None:
-                logger.warning(f"Пропуск некорректной проверки: {effect}")
-                continue
+    for effect in effects_list:
+        stat_name = effect.get("stat")
+        value_str = effect.get("value", "")
+        hide_effect = effect.get("hide", False)
 
-            current_value = temp_user_attr.get(stat_name)
-            val_for_check = 0
-            try:
-                val_for_check = int(current_value)
-            except (ValueError, TypeError):
-                logger.warning(f"Стат {stat_name} для проверки имеет нечисловое значение '{current_value}'. Проверка с 0.")
-            
+        action_type, op_char, numeric_val = _parse_effect_value(value_str)
+
+        if action_type == "invalid" or not stat_name or numeric_val is None:
+            logger.warning(f"Пропуск некорректного эффекта: {effect}")
+            continue
+
+        current_value = temp_user_attr.get(stat_name)
+        val_for_calc = 0
+        try:
+            val_for_calc = int(current_value)
+        except (ValueError, TypeError):
+            logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_value}'. Используется 0.")
+
+        if action_type == "check":
             check_passed = (
-                (op_char == '>' and val_for_check > numeric_val) or
-                (op_char == '<' and val_for_check < numeric_val) or
-                (op_char == '=' and val_for_check == numeric_val)
+                (op_char == '>' and val_for_calc > numeric_val) or
+                (op_char == '<' and val_for_calc < numeric_val) or
+                (op_char == '=' and val_for_calc == numeric_val)
             )
-
             if not check_passed:
-                reason = f"Проверка не пройдена: {stat_name} {op_char}{numeric_val} (у вас: {val_for_check})"
-                if len(reason) > 200: # MAX_ALERT_LENGTH
+                reason = f"Проверка не пройдена: {stat_name} {op_char}{numeric_val} (у вас: {val_for_calc})"
+                if len(reason) > 200:
                     reason = reason[:197] + "..."
                 failure_reasons.append(reason)
-    
-    # 3. Формируем результат
+                break  # прерываем цепочку — дальнейшие эффекты не выполняются
+
+        elif action_type == "set":
+            temp_user_attr[stat_name] = numeric_val
+            if not hide_effect:
+                success_alert_parts.append(f"▫️Вы получили атрибут {stat_name}: {numeric_val}")
+
+        elif action_type == "modify":
+            new_val = val_for_calc + numeric_val if op_char == '+' else val_for_calc - numeric_val
+            temp_user_attr[stat_name] = new_val
+            if not hide_effect:
+                word = "увеличен" if op_char == '+' else "уменьшен"
+                success_alert_parts.append(f"▫️Атрибут {stat_name} {word} на {abs(numeric_val)}")
+
+    # Результат обработки
     final_alert_text = "\n".join(success_alert_parts)
-    
+
     if failure_reasons:
         failure_alert = "\n".join(failure_reasons)
         full_alert = f"{final_alert_text}\n\n⚠️ {failure_alert}" if final_alert_text else f"⚠️ {failure_alert}"
-        # Возвращаем флаг needs_retry = True
         return False, full_alert.strip(), True, story_state
 
-    # Все проверки пройдены успешно
+    # Проверки пройдены, сохраняем изменения
+    story_state["user_attributes"] = temp_user_attr
+    save_story_state_to_firebase(inline_message_id, story_state)
+    if context and inline_message_id:
+        context.bot_data.setdefault(inline_message_id, {})["user_attributes"] = temp_user_attr
+
     return True, final_alert_text.strip(), False, story_state
+
 
 def clean_caption(text: str) -> str:
     """Удаляет конструкции вида ((+2)) и [[-4]] из текста."""
