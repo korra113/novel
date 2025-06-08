@@ -1165,9 +1165,9 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             keyboard.append([InlineKeyboardButton(button_text_display, callback_data=current_callback_data)])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-
-        if show_vote_counts:
-            caption += f"\n\n🗳️ Идёт голосование. Нужно {required_votes_for_poll} голосов для выбора."
+        
+        #if show_vote_counts:
+            #caption += f"\n\n🗳️ Идёт голосование. Нужно {required_votes_for_poll} голосов для выбора."
         
         
         # Формируем данные для сохранения, включая poll_details
@@ -1543,17 +1543,21 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
             poll_details_fb = story_state_from_firebase["poll_details"]
 
             votes_raw = poll_details_fb.get("votes")
-            votes_dict = deserialize_votes_from_db(votes_raw) # Используем новую функцию
+            votes_dict = deserialize_votes_from_db(votes_raw)  # Используем новую функцию
+
+            # Удаляем из voted_users всех, кто не проголосовал
+            all_voted_in_votes = set(user_id for vote_list in votes_dict.values() for user_id in vote_list)
             voted_users_list = poll_details_fb.get("voted_users", [])
-            
+            cleaned_voted_users = [uid for uid in voted_users_list if uid in all_voted_in_votes]
+
             rehydrated_poll_data = {
                 "type": "poll",
                 "target_user_id": story_state_from_firebase["target_user_id"],
                 "story_id": story_state_from_firebase["story_id"],
                 "current_fragment_id": current_fragment_id_fb,
                 "choices_data": poll_details_fb.get("choices_data", []),
-                "votes": votes_dict, # `votes_dict` теперь всегда чистый
-                "voted_users": set(voted_users_list),
+                "votes": votes_dict,
+                "voted_users": set(cleaned_voted_users),
                 "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
                 "user_attributes": story_state_from_firebase.get("user_attributes", {}),
             }
