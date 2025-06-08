@@ -670,24 +670,27 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
 
     # Конвертируем set в list для Firebase (JSON)
     if 'poll_details' in story_state_data and story_state_data['poll_details']:
-        if 'votes' in story_state_data['poll_details']:
-            votes_data = story_state_data['poll_details']['votes']
-            # Проверка на dict важна! Если это список, то будут проблемы.
+        poll_details = story_state_data['poll_details']
+    
+        if 'votes' in poll_details:
+            votes_data = poll_details['votes']
+    
             if isinstance(votes_data, dict):
+                # Конвертируем dict с None в [] и ключи в строки
                 story_state_data['poll_details']['votes'] = {
-                    str(idx): list(user_set or [])  # user_set может быть None
+                    str(idx): list(user_set or [])  # None → []
                     for idx, user_set in votes_data.items()
                 }
+    
             elif isinstance(votes_data, list):
-                # Если всё же попал список — превращаем в словарь, игнорируя None
+                # Превращаем список в словарь, гарантируя отсутствие None
                 story_state_data['poll_details']['votes'] = {
-                    str(i): list(v) if v is not None else []
+                    str(i): list(v) if isinstance(v, list) else []
                     for i, v in enumerate(votes_data)
-                    if v is not None
                 }
-
-        if 'voted_users' in story_state_data['poll_details'] and isinstance(story_state_data['poll_details']['voted_users'], set):
-            story_state_data['poll_details']['voted_users'] = list(story_state_data['poll_details']['voted_users'])
+    
+        if 'voted_users' in poll_details and isinstance(poll_details['voted_users'], set):
+            poll_details['voted_users'] = list(poll_details['voted_users'])
 
     logger.info(f"Saving to Firebase for {inline_message_id}: {story_state_data}")
     ref.set(story_state_data)
