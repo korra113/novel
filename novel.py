@@ -1571,6 +1571,19 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
             context.bot_data[query.inline_message_id] = rehydrated_poll_data
             poll_data = rehydrated_poll_data
 
+        votes_dict = poll_data.get("votes", {})  # словарь вида {индекс_варианта: [user_id, ...]}
+        voted_users_set = poll_data.get("voted_users", set())  # уже как set
+
+        # Собираем всех реально проголосовавших пользователей из votes_dict
+        all_voted_in_votes = set(user_id for vote_list in votes_dict.values() for user_id in vote_list)
+
+        # Очищаем список проголосовавших от неактуальных ID
+        cleaned_voted_users = voted_users_set.intersection(all_voted_in_votes)
+
+        # Обновляем poll_data, если нужно
+        poll_data["voted_users"] = cleaned_voted_users
+
+        
         # Проверки после того, как poll_data точно есть (из памяти или Firebase)
         if not poll_data or poll_data.get("type") != "poll": # Повторная проверка на всякий случай
             await query.answer("Голосование не найдено или завершено.", show_alert=True)
