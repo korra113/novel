@@ -1387,11 +1387,14 @@ async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str,
             proceed = False
             needs_retry = False # В случае ошибки кода не повторяем
 
-    winner_message_text = f"Голосование завершено!\nВыбран вариант: \"{winner_text_choice}\""
+    safe_winner_text_choice = html.escape(winner_text_choice)
+    safe_alert_text = html.escape(alert_text) if alert_text else None
+
+    winner_message_text = f"Голосование завершено!\nВыбран вариант: \"{safe_winner_text_choice}\""
     if required_votes_to_win > 1:
         winner_message_text += f" ({num_votes_for_winner} голосов)."
-    if alert_text:
-        winner_message_text += f"\n\n{alert_text}"
+    if safe_alert_text:
+        winner_message_text += f"\n\n{safe_alert_text}"
 
     # ⛔ Если проверка провалена и нужен повтор
     if not proceed and needs_retry:
@@ -5498,14 +5501,16 @@ async def handle_select_choice_to_edit(update: Update, context: ContextTypes.DEF
         await query.edit_message_text(f"Произошла ошибка при выборе кнопки: {e}. Попробуйте снова.")
         await show_fragment_actions(update, context, fragment_id)
         return ADD_CONTENT
-
+    
     context.user_data['choice_index_to_edit'] = choice_index_to_edit
-
+    
+    escaped_choice_text = html.escape(current_choice_text)
+    
     await query.edit_message_text(
-        f"Вы выбрали кнопку: <code>{current_choice_text}</code>.\nВведите новый текст для этой кнопки:",
+        f"Вы выбрали кнопку: <code>{escaped_choice_text}</code>.\nВведите новый текст для этой кнопки:",
         parse_mode='HTML'
     )
-
+    
     return AWAITING_NEW_CHOICE_TEXT
 
 
