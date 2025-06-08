@@ -902,6 +902,41 @@ def replace_attributes_in_text(text: str, user_attributes: dict) -> str:
             return f"Атрибут ({key}) отсутствует"
     return re.sub(r"\{\{(.*?)\}\}", replace_match, text)
 
+def deserialize_votes_from_db(votes_data) -> dict:
+    """
+    Безопасно конвертирует данные о голосах из Firebase (любого формата)
+    в чистый словарь {индекс: множество}.
+    """
+    if not votes_data:
+        return {}
+
+    clean_votes = {}
+    
+    # Обработка нового/правильного формата: {"0": [123], "1": [456]}
+    if isinstance(votes_data, dict):
+        for key, user_ids in votes_data.items():
+            try:
+                idx = int(key)
+                if user_ids and isinstance(user_ids, list):
+                    clean_votes[idx] = {uid for uid in user_ids if uid is not None}
+                else:
+                    clean_votes[idx] = set()
+            except (ValueError, TypeError):
+                continue # Игнорируем невалидные ключи
+        return clean_votes
+
+    # Обработка старого/испорченного формата: [[123], null, [null, 456]]
+    if isinstance(votes_data, list):
+        for idx, user_ids in enumerate(votes_data):
+            if user_ids and isinstance(user_ids, list):
+                clean_votes[idx] = {uid for uid in user_ids if uid is not None}
+            else:
+                clean_votes[idx] = set()
+        return clean_votes
+            
+    return {}
+
+
 async def display_fragment_for_interaction(context: CallbackContext, inline_message_id: str, target_user_id_str: str, story_id: str, fragment_id: str):
     logger.info(f"Displaying fragment: inline_msg_id={inline_message_id}, target_user={target_user_id_str}, story={story_id}, fragment={fragment_id}")
     
@@ -959,21 +994,17 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
         required_votes_for_poll = story_state_from_firebase.get("required_votes_to_win")
         if "poll_details" in story_state_from_firebase and story_state_from_firebase.get("current_fragment_id") == fragment_id:
             poll_details_fb = story_state_from_firebase["poll_details"]
-            raw_votes = poll_details_fb.get("votes", {})
-            if isinstance(raw_votes, dict):
-                votes = {int(k): v_set for k, v_set in raw_votes.items()}
-            elif isinstance(raw_votes, list):
-                votes = {i: v_set for i, v_set in enumerate(raw_votes)}
-            else:
-                votes = {}            
+            raw_votes = poll_details_fb.get("votes")
+            votes = deserialize_votes_from_db(raw_votes) # Используем новую функцию
+            voted_users_list = poll_details_fb.get("voted_users", [])           
             current_poll_data_from_bot_data = {
                 "type": "poll",
                 "target_user_id": story_state_from_firebase["target_user_id"],
                 "story_id": story_state_from_firebase["story_id"],
                 "current_fragment_id": story_state_from_firebase["current_fragment_id"],
                 "choices_data": poll_details_fb.get("choices_data", []),
-                "votes": votes,
-                "voted_users": poll_details_fb.get("voted_users", set()),
+                "votes": votes, # `votes` теперь всегда чистый {int: set}
+                "voted_users": set(voted_users_list), # Восстанавливаем в set
                 "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
                 "user_attributes": user_attributes,
             }
@@ -1147,8 +1178,8 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             "required_votes_to_win": poll_data_to_use["required_votes_to_win"],
             "poll_details": {
                 "choices_data": poll_data_to_use["choices_data"], # Включая полные effects
-                "votes": poll_data_to_use["votes"], 
-                "voted_users": poll_data_to_use["voted_users"],
+                "votes": {str(k): list(v) for k, v in poll_data_to_use["votes"].items()},
+                "voted_users": list(poll_data_to_use["voted_users"]), # Также конвертируем в список
             },
             "user_attributes": user_attributes,
         }
@@ -1511,14 +1542,9 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
             current_fragment_id_fb = story_state_from_firebase.get("current_fragment_id")
             poll_details_fb = story_state_from_firebase["poll_details"]
 
-            votes_raw = poll_details_fb.get("votes", [])
-            if isinstance(votes_raw, list):
-                votes_dict = {
-                    idx: set(user_ids if isinstance(user_ids, list) else [user_ids])
-                    for idx, user_ids in enumerate(votes_raw)
-                }
-            else:
-                votes_dict = {}
+            votes_raw = poll_details_fb.get("votes")
+            votes_dict = deserialize_votes_from_db(votes_raw) # Используем новую функцию
+            voted_users_list = poll_details_fb.get("voted_users", [])
             
             rehydrated_poll_data = {
                 "type": "poll",
@@ -1526,8 +1552,8 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
                 "story_id": story_state_from_firebase["story_id"],
                 "current_fragment_id": current_fragment_id_fb,
                 "choices_data": poll_details_fb.get("choices_data", []),
-                "votes": votes_dict,  # Приводим ключи к int
-                "voted_users": poll_details_fb.get("voted_users", set()),
+                "votes": votes_dict, # `votes_dict` теперь всегда чистый
+                "voted_users": set(voted_users_list),
                 "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
                 "user_attributes": story_state_from_firebase.get("user_attributes", {}),
             }
@@ -1633,6 +1659,7 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
         if query and hasattr(query, 'answer') and not query.answered:
             try: await query.answer("Ошибка при голосовании.")
             except Exception: pass
+
 
 
 def is_possible_story_id(text: str) -> bool:
