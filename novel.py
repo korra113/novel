@@ -5360,57 +5360,93 @@ def split_html_around_custom_tags(text):
         
     return result
 
+def escape(text):
+    return html.escape(text)
+
 def format_text_to_html(message):
     raw_text = message.text or message.caption
-    logger.info(f"Дraw_text {raw_text}.")
     if not raw_text:
         return ""
 
     entities = message.entities if message.text else message.caption_entities
     if not entities:
-        escaped_text = escape(raw_text.strip())
-        return add_plain_links(escaped_text)
+        return escape(raw_text)
 
-    formatted_text = ""
-    offset = 0
+    # Преобразуем строку в UTF-16
+    utf16_text = raw_text.encode('utf-16-le')
+    code_units = []
+    i = 0
+    while i < len(utf16_text):
+        # каждый символ в utf-16 занимает 2 байта
+        code_unit = utf16_text[i:i+2]
+        code_units.append(code_unit)
+        i += 2
 
+    # Сопоставим UTF-16 позиции с индексами в Python строке
+    utf16_index_to_py_index = {}
+    py_index = 0
+    utf16_pos = 0
+    for ch in raw_text:
+        utf16_len = len(ch.encode('utf-16-le')) // 2
+        for _ in range(utf16_len):
+            utf16_index_to_py_index[utf16_pos] = py_index
+            utf16_pos += 1
+        py_index += 1
+
+    tag_events = defaultdict(list)
     for entity in entities:
-        start, end = entity.offset, entity.offset + entity.length
-        plain_text = escape(raw_text[offset:start])
-        formatted_text += add_plain_links(plain_text)
-        entity_text = escape(raw_text[start:end])
+        tag = entity.type
+        if tag == "bold":
+            tag = "b"
+        elif tag == "italic":
+            tag = "i"
+        elif tag == "underline":
+            tag = "u"
+        elif tag == "strikethrough":
+            tag = "s"
+        elif tag == "code":
+            tag = "code"
+        elif tag == "pre":
+            tag = "pre"
+        elif tag == "spoiler":
+            tag = "span class=\"tg-spoiler\""
+        elif tag in ["blockquote", "expandable_blockquote"]:
+            tag = "blockquote expandable"
+        elif tag == "text_link":
+            tag = f'a href="{entity.url}"'
+        elif tag == "url":
+            continue
 
-        if entity.type == "bold":
-            formatted_text += f"<b>{entity_text}</b>"
-        elif entity.type == "italic":
-            formatted_text += f"<i>{entity_text}</i>"
-        elif entity.type == "underline":
-            formatted_text += f"<u>{entity_text}</u>"
-        elif entity.type == "blockquote":
-            formatted_text += f"<blockquote expandable>{entity_text}</blockquote>"
-        elif entity.type == "expandable_blockquote":
-            formatted_text += f"<blockquote expandable>{entity_text}</blockquote>"            
-        elif entity.type == "strikethrough":
-            formatted_text += f"<s>{entity_text}</s>"
-        elif entity.type == "code":
-            formatted_text += f"<code>{entity_text}</code>"
-        elif entity.type == "pre":
-            formatted_text += f"<pre>{entity_text}</pre>"
-        elif entity.type == "text_link":
-            formatted_text += f'<a href="{entity.url}">{entity_text}</a>'
-        elif entity.type == "spoiler":
-            formatted_text += f'<span class="tg-spoiler">{entity_text}</span>'
-        elif entity.type == "url":
-            formatted_text += f'{entity_text}'
+        start = utf16_index_to_py_index.get(entity.offset, None)
+        end = utf16_index_to_py_index.get(entity.offset + entity.length - 1, None)
+        if start is None or end is None:
+            continue
+        end += 1  # включительно
+        tag_events[start].append(("open", tag))
+        tag_events[end].append(("close", tag.split()[0]))
 
-        offset = end
+    result = ""
+    open_tags = []
 
-    formatted_text += add_plain_links(escape(raw_text[offset:]))
+    for i, ch in enumerate(raw_text):
+        if i in tag_events:
+            for event, tag in sorted(tag_events[i], key=lambda x: x[0] != "close"):
+                if event == "close":
+                    while open_tags:
+                        last = open_tags.pop()
+                        result += f"</{last}>"
+                        if last == tag:
+                            break
+                elif event == "open":
+                    tagname = tag.split()[0]
+                    open_tags.append(tagname)
+                    result += f"<{tag}>"
+        result += escape(ch)
 
-    # Постобработка: вынесение кастомных тегов
-    formatted_text = split_html_around_custom_tags(formatted_text)
-    logger.info(f"formatted_text {formatted_text}.")
-    return formatted_text
+    while open_tags:
+        result += f"</{open_tags.pop()}>"
+
+    return result
 
 def add_plain_links(text):
     # Регулярное выражение для поиска обычных ссылок
