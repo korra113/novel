@@ -938,7 +938,10 @@ def deserialize_votes_from_db(votes_data) -> dict:
 
 
 async def display_fragment_for_interaction(context: CallbackContext, inline_message_id: str, target_user_id_str: str, story_id: str, fragment_id: str):
-    logger.info(f"\n→ Показываем фрагмент: story={story_id}, fragment={fragment_id}, inline_msg_id={inline_message_id}")
+    """
+    Отображает фрагмент истории, обрабатывая состояние, голосования и доступность вариантов выбора.
+    """
+    logger.info(f"[{inline_message_id}] Отображение фрагмента {fragment_id} для истории {story_id}.")
 
     all_data = load_data()
     story_definition = None
@@ -948,189 +951,230 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             break
 
     if not story_definition:
-        logger.info(f"История {story_id} не найдена")
-        if inline_message_id:
-            try:
-                await context.bot.edit_message_text(inline_message_id=inline_message_id, text="История не найдена.")
-            except Exception as e:
-                logger.info(f"Не удалось отредактировать сообщение (история не найдена): {e}")
+        logger.warning(f"[{inline_message_id}] История {story_id} не найдена в определениях.")
+        try:
+            await context.bot.edit_message_text(inline_message_id=inline_message_id, text="История не найдена.")
+        except Exception as e:
+            logger.error(f"[{inline_message_id}] Не удалось отредактировать сообщение об ошибке (история не найдена): {e}")
         return
 
     fragment = story_definition.get("fragments", {}).get(fragment_id)
     if not fragment:
-        logger.info(f"Фрагмент {fragment_id} не найден в истории {story_id}")
-        if inline_message_id:
-            try:
-                await context.bot.edit_message_text(inline_message_id=inline_message_id, text="Фрагмент не найден.")
-            except Exception as e:
-                logger.info(f"Не удалось отредактировать сообщение (фрагмент не найден): {e}")
+        logger.warning(f"[{inline_message_id}] Фрагмент {fragment_id} не найден в истории {story_id}.")
+        try:
+            await context.bot.edit_message_text(inline_message_id=inline_message_id, text="Фрагмент не найден.")
+        except Exception as e:
+            logger.error(f"[{inline_message_id}] Не удалось отредактировать сообщение об ошибке (фрагмент не найден): {e}")
         return
 
-    choices = fragment.get("choices", [])
-    raw_caption = fragment.get("text", "")
-    media = fragment.get("media", [])
+    # --- Централизованная загрузка и определение состояния ---
 
-    required_votes_for_poll = None
-    current_poll_data_from_bot_data = None
     user_attributes = {}
+    current_poll_data_from_bot_data = None
+    required_votes_for_poll = None
 
     story_state_from_firebase = load_story_state_from_firebase(inline_message_id)
     if story_state_from_firebase:
-        logger.info(f"Загружено состояние из Firebase для {inline_message_id}")
+        logger.info(f"[{inline_message_id}] Загружено состояние из Firebase.")
         user_attributes = story_state_from_firebase.get("user_attributes", {})
         story_id = story_state_from_firebase.get("story_id", story_id)
         target_user_id_str = story_state_from_firebase.get("target_user_id", target_user_id_str)
         required_votes_for_poll = story_state_from_firebase.get("required_votes_to_win")
 
-        if (story_state_from_firebase.get("poll_details") and 
-            story_state_from_firebase.get("current_fragment_id") == fragment_id):
+        # Если в Firebase есть данные об опросе для текущего фрагмента, загружаем их
+        if "poll_details" in story_state_from_firebase and story_state_from_firebase.get("current_fragment_id") == fragment_id:
+            logger.info(f"[{inline_message_id}] Обнаружены данные опроса в Firebase, загрузка в bot_data.")
             poll_details_fb = story_state_from_firebase["poll_details"]
-            votes = deserialize_votes_from_db(poll_details_fb.get("votes"))
-            voted_users_list = poll_details_fb.get("voted_users", [])
             current_poll_data_from_bot_data = {
                 "type": "poll",
-                "target_user_id": target_user_id_str,
-                "story_id": story_id,
-                "current_fragment_id": fragment_id,
+                "target_user_id": story_state_from_firebase["target_user_id"],
+                "story_id": story_state_from_firebase["story_id"],
+                "current_fragment_id": story_state_from_firebase["current_fragment_id"],
                 "choices_data": poll_details_fb.get("choices_data", []),
-                "votes": votes,
-                "voted_users": set(voted_users_list),
-                "required_votes_to_win": required_votes_for_poll,
+                "votes": deserialize_votes_from_db(poll_details_fb.get("votes")),
+                "voted_users": set(poll_details_fb.get("voted_users", [])),
+                "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
                 "user_attributes": user_attributes,
             }
             context.bot_data[inline_message_id] = current_poll_data_from_bot_data
-            logger.info(f"Контекст обновлён: состояние опроса из Firebase для {inline_message_id}")
 
-    bot_data_entry = context.bot_data.get(inline_message_id)
-    if bot_data_entry:
+    # Проверяем, есть ли свежие данные в bot_data (например, после установки порога голосов)
+    if inline_message_id in context.bot_data:
+        bot_data_entry = context.bot_data[inline_message_id]
         if bot_data_entry.get("type") == "poll_setup_pending_display":
             required_votes_for_poll = bot_data_entry.get("required_votes")
-            logger.info(f"Используем required_votes из setup: {required_votes_for_poll}")
+            logger.info(f"[{inline_message_id}] Применен порог голосов из `poll_setup_pending_display`: {required_votes_for_poll}")
         if "user_attributes" in bot_data_entry:
             user_attributes = bot_data_entry["user_attributes"]
+            logger.info(f"[{inline_message_id}] Атрибуты пользователя взяты из `context.bot_data`.")
 
-    logger.info(f"Атрибуты пользователя: {user_attributes}")
-    raw_caption = replace_attributes_in_text(raw_caption, user_attributes)
-    caption = clean_caption(raw_caption)[:1000]
-
+    raw_caption = fragment.get("text", "")
+    caption = clean_caption(replace_attributes_in_text(raw_caption, user_attributes))[:1000]
+    choices = fragment.get("choices", [])
+    
     if len(choices) > 1 and required_votes_for_poll is None:
-        logger.info(f"Ошибка: отсутствует порог голосов при наличии выборов в фрагменте {fragment_id}")
-        if inline_message_id:
-            try:
-                await context.bot.edit_message_text(inline_message_id=inline_message_id, text="Ошибка конфигурации голосования.")
-            except Exception as e:
-                logger.info(f"Ошибка при редактировании сообщения: {e}")
+        logger.error(f"[{inline_message_id}] КРИТИЧЕСКАЯ ОШИБКА: Порог голосов не определен для фрагмента {fragment_id} с вариантами выбора.")
+        try:
+            await context.bot.edit_message_text(inline_message_id=inline_message_id, text="Ошибка конфигурации голосования: порог не установлен.")
+        except Exception as e:
+            logger.error(f"[{inline_message_id}] Не удалось отправить сообщение о критической ошибке: {e}")
         return
 
+    # --- Логика обновления медиа ---
+    media = fragment.get("media", [])
+    if media and isinstance(media, list): media = media[:1]
+    
     app_data = context.application.bot_data.setdefault("fragments", {})
     previous_fragment = app_data.get(inline_message_id, {}).get("last_fragment")
-    user_attributes = context.bot_data.get(inline_message_id, {}).get("user_attributes", user_attributes)
 
-    if not user_attributes:
-        story_state_from_firebase = load_story_state_from_firebase(inline_message_id)
-        user_attributes = story_state_from_firebase.get("user_attributes", {})
-        if inline_message_id in context.bot_data:
-            context.bot_data[inline_message_id]["user_attributes"] = user_attributes
-
-    if media and isinstance(media, list):
-        media = media[:1]
     if not media and previous_fragment:
         old_media = previous_fragment.get("media", [])
         if len(old_media) == 1 and old_media[0].get("type") == "photo":
             media = [{"type": "photo", "file_id": DEFAULT_FILE_ID}]
-
+    
     fragment["media"] = media
-    app_data.setdefault(inline_message_id, {})["last_fragment"] = {"id": fragment_id, "media": media}
+    app_data.setdefault(inline_message_id, {})
+    app_data[inline_message_id]["last_fragment"] = {"id": fragment_id, "media": media}
 
+    # --- Формирование клавиатуры и обработка голосований ---
     reply_markup = None
     if len(choices) > 0:
         poll_data_to_use = None
         poll_data_in_memory = context.bot_data.get(inline_message_id)
-        if (poll_data_in_memory and poll_data_in_memory.get("type") == "poll" and 
-            poll_data_in_memory.get("current_fragment_id") == fragment_id):
-            logger.info(f"Используем данные опроса из памяти")
+
+        # Приоритет: 1. Свежие данные в bot_data | 2. Данные из Firebase | 3. Создание нового опроса
+        if poll_data_in_memory and poll_data_in_memory.get("type") == "poll" and poll_data_in_memory.get("current_fragment_id") == fragment_id:
+            logger.info(f"[{inline_message_id}] Используются данные опроса из оперативной памяти (`bot_data`).")
             poll_data_to_use = poll_data_in_memory
         elif current_poll_data_from_bot_data:
-            logger.info(f"Используем данные опроса из Firebase")
+            logger.info(f"[{inline_message_id}] Используются данные опроса, ранее загруженные из Firebase.")
             poll_data_to_use = current_poll_data_from_bot_data
-            context.bot_data[inline_message_id] = poll_data_to_use
         else:
-            logger.info(f"Создаём новый опрос для фрагмента {fragment_id}")
+            logger.info(f"[{inline_message_id}] Создание нового опроса для фрагмента {fragment_id}.")
             poll_data_to_use = {
                 "type": "poll",
-                "target_user_id": target_user_id_str,
-                "story_id": story_id,
+                "target_user_id": target_user_id_str, "story_id": story_id,
                 "current_fragment_id": fragment_id,
-                "choices_data": [],
+                "choices_data": [{"text": c["text"], "next_fragment_id": c["target"], "effects": c.get("effects", [])} for c in choices],
                 "votes": {idx: set() for idx in range(len(choices))},
                 "voted_users": set(),
                 "required_votes_to_win": required_votes_for_poll,
                 "user_attributes": user_attributes
             }
-            for idx, choice in enumerate(choices):
-                poll_data_to_use["choices_data"].append({
-                    "text": choice["text"],
-                    "next_fragment_id": choice["target"],
-                    "effects": choice.get("effects", [])
-                })
-            context.bot_data[inline_message_id] = poll_data_to_use
+        context.bot_data[inline_message_id] = poll_data_to_use
 
-        keyboard = generate_poll_keyboard(poll_data_to_use, inline_message_id, required_votes_for_poll)
+        # Генерация кнопок
+        keyboard = []
+        show_vote_counts = required_votes_for_poll > 1
+        for idx, choice_data in enumerate(poll_data_to_use["choices_data"]):
+            is_choice_available = True
+            must_hide = False
+            missing_stats = []
+
+            for effect in choice_data.get("effects", []):
+                action_type, op, num_req = _parse_effect_value(str(effect.get("value", "")))
+                if action_type != "check": continue
+
+                stat_name = effect.get("stat")
+                if not stat_name or num_req is None: continue
+
+                try:
+                    user_stat_val = int(user_attributes.get(stat_name))
+                except (ValueError, TypeError):
+                    user_stat_val = None
+
+                check_passed = user_stat_val is not None and (
+                    (op == '>' and user_stat_val > num_req) or
+                    (op == '<' and user_stat_val < num_req) or
+                    (op == '=' and user_stat_val == num_req)
+                )
+
+                if not check_passed:
+                    is_choice_available = False
+                    if effect.get("hide", False):
+                        must_hide = True
+                        break
+                    else:
+                        missing_stats.append(stat_name)
+            
+            if must_hide:
+                continue
+
+            button_text = choice_data["text"]
+            if is_choice_available:
+                if show_vote_counts:
+                    num_votes = len(poll_data_to_use["votes"].get(idx, set()))
+                    button_text = f"({num_votes}/{required_votes_for_poll}) {button_text}"
+            else:
+                if missing_stats:
+                    button_text = f"{button_text} (не хватает: {', '.join(missing_stats)})"
+                else:
+                    button_text = f"[НЕДОСТУПНО] {button_text}"
+
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"vote_{inline_message_id}_{idx}")])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        save_story_state_to_firebase(inline_message_id, {
-            "story_id": story_id,
-            "target_user_id": target_user_id_str,
-            "current_fragment_id": fragment_id,
-            "required_votes_to_win": required_votes_for_poll,
+        # Сохранение актуального состояния в Firebase
+        firebase_save_data = {
+            "story_id": poll_data_to_use["story_id"],
+            "target_user_id": poll_data_to_use["target_user_id"],
+            "current_fragment_id": poll_data_to_use["current_fragment_id"],
+            "required_votes_to_win": poll_data_to_use["required_votes_to_win"],
             "poll_details": {
                 "choices_data": poll_data_to_use["choices_data"],
                 "votes": {str(k): list(v) for k, v in poll_data_to_use["votes"].items()},
-                "voted_users": list(poll_data_to_use["voted_users"])
+                "voted_users": list(poll_data_to_use["voted_users"]),
             },
             "user_attributes": user_attributes,
-        })
-    else:
+        }
+        logger.info(f"[{inline_message_id}] Сохранение состояния (с данными опроса) в Firebase.")
+        save_story_state_to_firebase(inline_message_id, firebase_save_data)
+
+    else:  # Нет вариантов выбора (финальный фрагмент)
         caption += "\n\n(История завершена)"
         existing_state = load_story_state_from_firebase(inline_message_id)
         if existing_state:
-            existing_state.pop("poll_details", None)
-            existing_state["current_fragment_id"] = fragment_id
-            save_story_state_to_firebase(inline_message_id, existing_state)
+            updated = False
+            if "poll_details" in existing_state:
+                logger.info(f"[{inline_message_id}] Фрагмент без выборов. Очистка данных опроса в Firebase.")
+                existing_state.pop("poll_details", None)
+                updated = True
+            
+            if existing_state.get("current_fragment_id") != fragment_id:
+                existing_state["current_fragment_id"] = fragment_id
+                updated = True
+            
+            if updated:
+                save_story_state_to_firebase(inline_message_id, existing_state)
 
+    # --- Отправка/Редактирование сообщения ---
     try:
         if media and isinstance(media, list) and media[0].get("file_id"):
             media_item = media[0]
-            file_id = media_item.get("file_id")
-            media_type = media_item.get("type")
-            input_media = None
-            if media_type == "photo":
-                input_media = InputMediaPhoto(media=file_id, caption=caption, parse_mode='HTML')
-            elif media_type == "video":
-                input_media = InputMediaVideo(media=file_id, caption=caption, parse_mode='HTML')
-            elif media_type == "animation":
-                input_media = InputMediaAnimation(media=file_id, caption=caption, parse_mode='HTML')
-            elif media_type == "audio":
-                input_media = InputMediaAudio(media=file_id, caption=caption, parse_mode='HTML')
-
-            if input_media:
+            media_map = {
+                "photo": InputMediaPhoto, "video": InputMediaVideo,
+                "animation": InputMediaAnimation, "audio": InputMediaAudio
+            }
+            input_media_class = media_map.get(media_item.get("type"))
+            if input_media_class:
+                logger.info(f"[{inline_message_id}] Обновление сообщения: Медиа ({media_item.get('type')}) и клавиатура.")
                 await context.bot.edit_message_media(
                     inline_message_id=inline_message_id,
-                    media=input_media,
+                    media=input_media_class(media=media_item["file_id"], caption=caption, parse_mode='HTML'),
                     reply_markup=reply_markup
                 )
-                logger.info(f"Фрагмент {fragment_id} успешно обновлён с медиа")
                 return
 
+        logger.info(f"[{inline_message_id}] Обновление сообщения: Только текст и клавиатура.")
         await context.bot.edit_message_text(
             inline_message_id=inline_message_id,
             text=caption,
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
-        logger.info(f"Фрагмент {fragment_id} успешно обновлён без медиа")
     except Exception as e:
-        logger.info(f"Ошибка при обновлении сообщения {inline_message_id}: {e}")
+        logger.error(f"[{inline_message_id}] Ошибка обновления сообщения: {e}")
 
 
 
