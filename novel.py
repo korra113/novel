@@ -913,16 +913,18 @@ def deserialize_votes_from_db(votes_data) -> dict:
     clean_votes = {}
     
     # Обработка нового/правильного формата: {"0": [123], "1": [456]}
+
     if isinstance(votes_data, dict):
         for key, user_ids in votes_data.items():
             try:
                 idx = int(key)
+                logger.debug(f"Обработка голосов: ключ={key}, значение={user_ids}")
                 if user_ids and isinstance(user_ids, list):
                     clean_votes[idx] = {uid for uid in user_ids if uid is not None}
                 else:
                     clean_votes[idx] = set()
             except (ValueError, TypeError):
-                continue # Игнорируем невалидные ключи
+                continue
         return clean_votes
 
     # Обработка старого/испорченного формата: [[123], null, [null, 456]]
@@ -977,6 +979,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
 
     # Загружаем сохраненное состояние из Firebase
     story_state_from_firebase = load_story_state_from_firebase(inline_message_id)
+    logger.info(f"===== Данные загружены из firebase: {story_state_from_firebase} ")
     if story_state_from_firebase:
         logger.info(f"{log_prefix} Загружено состояние из Firebase.")
         user_attributes = story_state_from_firebase.get("user_attributes", {})
@@ -988,6 +991,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
         if "poll_details" in story_state_from_firebase and story_state_from_firebase.get("current_fragment_id") == fragment_id:
             poll_details_fb = story_state_from_firebase["poll_details"]
             votes = deserialize_votes_from_db(poll_details_fb.get("votes"))
+            
             voted_users_list = poll_details_fb.get("voted_users", [])
             
             current_poll_data_from_firebase = {
@@ -1002,7 +1006,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
                 "user_attributes": user_attributes,
             }
             context.bot_data[inline_message_id] = current_poll_data_from_firebase
-            logger.info(f"{current_poll_data_from_firebase} ===== Данные голосования восстановлены из Firebase в `context.bot_data`.")
+            logger.info(f"===== Данные голосования восстановлены из Firebase в `context.bot_data`: {current_poll_data_from_firebase} ")
 
     # Проверяем, есть ли свежие данные в bot_data (например, после установки порога голосов)
     if inline_message_id in context.bot_data:
