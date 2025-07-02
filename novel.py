@@ -1064,18 +1064,29 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
     app_data.setdefault(inline_message_id, {})
     app_data[inline_message_id]["last_fragment"] = {"id": fragment_id, "media": media}
 
-
+    
     if len(choices) > 0:
         if required_votes_for_poll is None:
             logger.error(f"Попытка создать опрос для {inline_message_id} (fragment: {fragment_id}) без порога.")
             return
-
+    
         poll_data_to_use = None
-        if current_poll_data_from_bot_data and current_poll_data_from_bot_data.get("current_fragment_id") == fragment_id:
+        
+        # 1. Сначала ищем готовые данные в оперативной памяти (самые свежие)
+        poll_data_in_memory = context.bot_data.get(inline_message_id)
+        if poll_data_in_memory and poll_data_in_memory.get("type") == "poll" and poll_data_in_memory.get("current_fragment_id") == fragment_id:
+            logger.info(f"Using fresh poll data from context.bot_data for fragment {fragment_id}")
+            poll_data_to_use = poll_data_in_memory
+        
+        # 2. Если в памяти нет, используем данные, загруженные из Firebase ранее в этой же функции
+        elif current_poll_data_from_bot_data and current_poll_data_from_bot_data.get("current_fragment_id") == fragment_id:
+            logger.info(f"Using loaded-from-Firebase poll data for fragment {fragment_id}")
             poll_data_to_use = current_poll_data_from_bot_data
-            logger.info(f"Reusing/using loaded poll data for {fragment_id}")
+            context.bot_data[inline_message_id] = poll_data_to_use # Сохраняем в память для будущих вызовов
+            
+        # 3. Если нигде нет — создаем новое голосование (только при первом показе фрагмента)
         else:
-            logger.info(f"Creating new poll_data for fragment {fragment_id}")
+            logger.info(f"No existing poll data found. Creating new poll for fragment {fragment_id}")
             poll_data_to_use = {
                 "type": "poll",
                 "target_user_id": target_user_id_str,
@@ -1087,15 +1098,13 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
                 "required_votes_to_win": required_votes_for_poll,
                 "user_attributes": user_attributes
             }
-            for idx, choice in enumerate(choices): # Используем оригинальные choices для построения poll_data_to_use
-                text = choice["text"]
-                next_fid = choice["target"]
-                effects = choice.get("effects", [])
+            for idx, choice in enumerate(choices):
                 poll_data_to_use["choices_data"].append({
-                    "text": text,
-                    "next_fragment_id": next_fid,
-                    "effects": effects
+                    "text": choice["text"],
+                    "next_fragment_id": choice["target"],
+                    "effects": choice.get("effects", [])
                 })
+            # Сохраняем свежесозданное голосование в память
             context.bot_data[inline_message_id] = poll_data_to_use
 
         keyboard = []
