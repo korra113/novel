@@ -919,7 +919,7 @@ def deserialize_votes_from_db(votes_data) -> dict:
             try:
                 idx = int(key)
                 logger.debug(f"Обработка голосов: ключ={key}, значение={user_ids}")
-                if user_ids and isinstance(user_ids, list):
+                if user_ids and isinstance(user_ids, (list, set)):
                     clean_votes[idx] = {uid for uid in user_ids if uid is not None}
                 else:
                     clean_votes[idx] = set()
@@ -930,12 +930,12 @@ def deserialize_votes_from_db(votes_data) -> dict:
     # Обработка старого/испорченного формата: [[123], null, [null, 456]]
     if isinstance(votes_data, list):
         for idx, user_ids in enumerate(votes_data):
-            if user_ids and isinstance(user_ids, list):
+            if user_ids and isinstance(user_ids, (list, set)):
                 clean_votes[idx] = {uid for uid in user_ids if uid is not None}
             else:
                 clean_votes[idx] = set()
         return clean_votes
-            
+
     return {}
 
 
