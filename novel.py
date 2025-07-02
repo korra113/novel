@@ -2049,6 +2049,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     first_fragment_id = next(iter(story_data["fragments"]), None)
                 if first_fragment_id:
                     context.user_data.clear()
+                    # ▼▼▼ НАЧАЛО ИСПРАВЛЕНИЯ ▼▼▼
+                    # Инициализируем и сохраняем начальный прогресс пользователя.
+                    # Это "сообщит" боту, что пользователь официально начал историю с этого фрагмента.
+                    initial_progress = {
+                        "fragment_id": first_fragment_id,
+                        "current_effects": {}  # Начинаем с пустыми эффектами
+                    }
+                    # Убедитесь, что у вас есть функция save_user_story_progress
+                    # и она импортирована в этот файл.
+                    save_user_story_progress(story_id_to_start, int(user_id_str), initial_progress)
+                    logger.info(f"Пользователь {user_id_str} запускает историю {story_id_to_start}. Начальный прогресс для фрагмента {first_fragment_id} сохранен.")
+                    # ▲▲▲ КОНЕЦ ИСПРАВЛЕНИЯ ▲▲▲
 
                     placeholder_message = await update.effective_message.reply_text("⏳ Загрузка истории...")
 
