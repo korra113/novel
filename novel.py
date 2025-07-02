@@ -1002,7 +1002,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
                 "user_attributes": user_attributes,
             }
             context.bot_data[inline_message_id] = current_poll_data_from_firebase
-            logger.info(f"{log_prefix} Данные голосования восстановлены из Firebase в `context.bot_data`.")
+            logger.info(f"{current_poll_data_from_firebase} ===== Данные голосования восстановлены из Firebase в `context.bot_data`.")
 
     # Проверяем, есть ли свежие данные в bot_data (например, после установки порога голосов)
     if inline_message_id in context.bot_data:
@@ -1048,30 +1048,58 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
 
     # 4. Логика обработки вариантов выбора (голосования)
     if len(choices) > 0:
-        poll_data_to_use = None
-        
-        # Определяем, какие данные для голосования использовать
-        poll_data_in_memory = context.bot_data.get(inline_message_id)
-        if poll_data_in_memory and poll_data_in_memory.get("type") == "poll" and poll_data_in_memory.get("current_fragment_id") == fragment_id:
+        # --- НАЧАЛО ИСПРАВЛЕННОГО БЛОКА ---
+    
+        poll_data_to_use = context.bot_data.get(inline_message_id)
+    
+        # Шаг 1: Проверяем, актуальны ли данные в оперативной памяти (RAM)
+        is_ram_data_valid = (
+            poll_data_to_use and
+            poll_data_to_use.get("type") == "poll" and
+            poll_data_to_use.get("current_fragment_id") == fragment_id
+        )
+    
+        if is_ram_data_valid:
             logger.info(f"{log_prefix} Используются актуальные данные голосования из `context.bot_data` (RAM).")
-            poll_data_to_use = poll_data_in_memory
-        elif current_poll_data_from_firebase:
-            logger.info(f"{log_prefix} Используются данные голосования, загруженные из Firebase.")
-            poll_data_to_use = current_poll_data_from_firebase
         else:
-            logger.info(f"{log_prefix} Создается новое голосование.")
-            poll_data_to_use = {
-                "type": "poll", "target_user_id": target_user_id_str, "story_id": story_id,
-                "current_fragment_id": fragment_id, "choices_data": [],
-                "votes": {idx: set() for idx in range(len(choices))}, "voted_users": set(),
-                "required_votes_to_win": required_votes_for_poll, "user_attributes": user_attributes
-            }
-            for idx, choice in enumerate(choices):
-                poll_data_to_use["choices_data"].append({
-                    "text": choice["text"], "next_fragment_id": choice["target"],
-                    "effects": choice.get("effects", [])
-                })
-        
+            logger.info(f"{log_prefix} Данные в RAM отсутствуют или устарели. Попытка загрузки из Firebase.")
+            poll_data_to_use = None # Сбрасываем неактуальные данные
+    
+            # Шаг 2: Если в RAM данных нет, пытаемся загрузить из Firebase
+            if story_state_from_firebase and "poll_details" in story_state_from_firebase:
+                poll_details_fb = story_state_from_firebase["poll_details"]
+                votes = deserialize_votes_from_db(poll_details_fb.get("votes"))
+                voted_users_list = poll_details_fb.get("voted_users", [])
+    
+                poll_data_to_use = {
+                    "type": "poll",
+                    "target_user_id": story_state_from_firebase["target_user_id"],
+                    "story_id": story_state_from_firebase["story_id"],
+                    "current_fragment_id": story_state_from_firebase["current_fragment_id"],
+                    "choices_data": poll_details_fb.get("choices_data", []),
+                    "votes": votes,
+                    "voted_users": set(voted_users_list),
+                    "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
+                    "user_attributes": user_attributes,
+                }
+                logger.info(f"{log_prefix} Данные голосования успешно восстановлены из Firebase.")
+            
+            # Шаг 3: Если нигде данных нет, создаем новое голосование
+            if not poll_data_to_use:
+                logger.info(f"{log_prefix} Данные не найдены. Создается новое голосование.")
+                poll_data_to_use = {
+                    "type": "poll", "target_user_id": target_user_id_str, "story_id": story_id,
+                    "current_fragment_id": fragment_id, "choices_data": [],
+                    "votes": {idx: set() for idx in range(len(choices))}, "voted_users": set(),
+                    "required_votes_to_win": required_votes_for_poll, "user_attributes": user_attributes
+                }
+                for idx, choice in enumerate(choices):
+                    poll_data_to_use["choices_data"].append({
+                        "text": choice["text"], "next_fragment_id": choice["target"],
+                        "effects": choice.get("effects", [])
+                    })
+    
+        # Шаг 4: Сохраняем итоговое, авторитетное состояние в RAM для последующих операций
         context.bot_data[inline_message_id] = poll_data_to_use
         
         # Формирование клавиатуры на основе проверок
@@ -1126,14 +1154,14 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             "target_user_id": poll_data_to_use["target_user_id"],
             "current_fragment_id": poll_data_to_use["current_fragment_id"],
             "required_votes_to_win": poll_data_to_use["required_votes_to_win"],
-            "user_attributes": user_attributes,
+            "user_attributes": user_attributes, # Используем атрибуты, определенные ранее в функции
             "poll_details": {
                 "choices_data": poll_data_to_use["choices_data"],
                 "votes": {str(k): list(v) for k, v in poll_data_to_use["votes"].items()},
                 "voted_users": list(poll_data_to_use["voted_users"]),
             },
         }
-        logger.info(f"{log_prefix} Сохранение состояния (с данными голосования) в Firebase.")
+        logger.info(f"{firebase_save_data} ===== Сохранение состояния (с данными голосования) в Firebase.")
         save_story_state_to_firebase(inline_message_id, firebase_save_data)
     
     else: # Нет вариантов выбора (финальный фрагмент или переход)
