@@ -91,11 +91,12 @@ logger = logging.getLogger(__name__)
 # --- Константы ---
 BOT_TOKEN = "7553491252:AAFwKa2WzZ6wKMVUIGt18oxCGPNqvSo5oRA"  # <-- ЗАМЕНИ НА СВОЙ ТОКЕН БОТА
 
-
-cred = credentials.Certificate('/etc/secrets/firebase-key.json')  # Путь к вашему JSON файлу
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://otlzhka-default-rtdb.europe-west1.firebasedatabase.app/'  # Замените на URL вашей базы данных
-})
+def init_firebase():
+    if not firebase_admin._apps:
+        cred = credentials.Certificate('/etc/secrets/firebase-key.json')
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': 'https://otlzhka-default-rtdb.europe-west1.firebasedatabase.app/'
+        })
 
 # Состояния для ConversationHandler (создание истории)
 # Существующие состояния + новое
@@ -148,6 +149,7 @@ async def delete_inline_stories(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
+        init_firebase()
         ref = db.reference('story_settings')
         all_stories = ref.get()
 
@@ -277,6 +279,7 @@ def load_story_settings(inline_message_id: str) -> dict:
     Загружает конкретные настройки истории по ключу inline_message_id из 'story_settings'.
     """
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно загрузить story_settings.")
             return {}
@@ -306,6 +309,7 @@ def load_all_user_stories(user_id_str: str) -> dict:
     Не ищет среди других пользователей и не проверяет coop_edit.
     """
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -333,6 +337,7 @@ def load_all_coop_stories_with_user(user_id_str: str) -> dict:
     Загружает все истории всех пользователей, в которых user_id_str есть в списке coop_edit.
     """
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -369,6 +374,7 @@ def load_story_by_id_fallback(story_id: str) -> dict:
     """
     logger.info(f"История {story_id}.")    
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -405,6 +411,7 @@ def load_user_story(user_id_str: str, story_id: str) -> dict:
     Если не находит напрямую, ищет среди всех историй других пользователей с coop_edit доступом.
     """
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -455,6 +462,7 @@ def load_data() -> dict:
     ключей 'users_story' и 'story_settings' в возвращаемом словаре.
     """
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME: # Проверка, инициализировано ли приложение Firebase
             logger.error("Firebase приложение не инициализировано. Невозможно загрузить данные.")
             return {"users_story": {}, "story_settings": {}}
@@ -495,6 +503,7 @@ def save_story_data(user_id_str: str, story_id: str, story_content: dict):
     изменений, внесённых параллельно другим пользователем.
     """
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно сохранить данные истории.")
             return
@@ -599,6 +608,7 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
     user_id_str и story_id извлекаются из context.user_data['delete_candidate'].
     Предполагается, что user_id_str является владельцем истории.
     """
+    init_firebase()
     if not firebase_admin._DEFAULT_APP_NAME:
         logger.error("Firebase приложение не инициализировано. Невозможно удалить историю.")
         if update.callback_query:
@@ -614,7 +624,7 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("Ошибка: данные для удаления истории не найдены в сессии.", show_alert=True)
         return
 
-    story_ref = db.reference(f'users_story/{user_id_owner}/{story_id_to_delete}')
+    story_ref .reference(f'users_story/{user_id_owner}/{story_id_to_delete}')
 
     try:
         if story_ref.get() is None:
@@ -646,6 +656,7 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
     Сохраняет полное состояние истории/голосования в Firebase.
     Добавляет или обновляет время запуска.
     """
+    init_firebase()
     if not inline_message_id:
         logger.error("save_story_state_to_firebase: inline_message_id is required.")
         return
@@ -702,6 +713,7 @@ def update_user_attributes(inline_message_id: str, user_attributes: dict):
     Обновляет только поле 'user_attributes' в story_settings/{inline_message_id}, 
     не затрагивая другие поля.
     """
+    init_firebase()
     if not inline_message_id:
         logger.error("update_user_attributes: inline_message_id is required.")
         return
@@ -721,6 +733,7 @@ def save_story_data_to_file(all_data: dict) -> bool:
     Аналогично save_all_data_firebase, но с булевым возвратом.
     """
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно сохранить данные (и вернуть статус).")
             return False
@@ -742,6 +755,7 @@ def load_story_state_from_firebase(inline_message_id: str) -> dict | None:
     Загружает состояние истории/голосования из Firebase.
     Конвертирует данные из JSON-совместимых форматов обратно в нужные типы (например, list в set).
     """
+    init_firebase()
     if not inline_message_id:
         logger.error("load_story_state_from_firebase: inline_message_id is required.")
         return None
@@ -1647,6 +1661,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return "\n".join(lines)
 
     if not query_text:
+        init_firebase()
         # Показываем все истории текущего пользователя
         user_stories_ref = db.reference(f'users_story/{user_id}')
         stories_to_show = user_stories_ref.get() or {}
@@ -1655,6 +1670,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         is_id_search = is_possible_story_id(query_text_lower)
 
         if is_id_search:
+            init_firebase()
             # Поиск по всем историям всех пользователей только по ID
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
@@ -1662,6 +1678,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     stories_to_show[query_text_lower] = user_stories_dict[query_text_lower]
                     break  # Нашли — достаточно
         else:
+            init_firebase()
             # Поиск по заголовкам только среди историй текущего пользователя
             user_stories = db.reference(f'users_story/{user_id}').get() or {}
             for story_id_key, story_content in user_stories.items():
@@ -1673,6 +1690,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Определяем владельца (нужно только если поиск был по ID)
         owner_user_id_for_story = user_id
         if is_possible_story_id(query_text):
+            init_firebase()
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
                 if story_id in user_stories_dict:
@@ -8207,6 +8225,7 @@ async def confirm_delete_all_neural(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def delete_all_neural_stories_firebase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    init_firebase()
     if not firebase_admin._DEFAULT_APP_NAME:
         logger.error("Firebase приложение не инициализировано.")
         if update.callback_query:
@@ -8285,6 +8304,7 @@ def get_user_progress_ref_path(story_id: str, user_id: int) -> str:
 def load_user_story_progress(story_id: str, user_id: int) -> dict:
     """Загружает current_effects и fragment_id пользователя для указанной истории."""
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME: # Проверка инициализации Firebase
             logger.error("Firebase приложение не инициализировано. Невозможно загрузить прогресс пользователя.")
             return {}
@@ -8298,6 +8318,7 @@ def load_user_story_progress(story_id: str, user_id: int) -> dict:
 def save_user_story_progress(story_id: str, user_id: int, progress_data: dict) -> None:
     """Сохраняет current_effects и fragment_id пользователя для указанной истории."""
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно сохранить прогресс пользователя.")
             return
@@ -8309,6 +8330,7 @@ def save_user_story_progress(story_id: str, user_id: int, progress_data: dict) -
 def clear_user_story_complete_progress(story_id: str, user_id: int) -> None:
     """Полностью стирает данные прохождения истории (fragment_id, current_effects) для пользователя."""
     try:
+        init_firebase()
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно очистить прогресс пользователя.")
             return
