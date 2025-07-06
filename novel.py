@@ -15,6 +15,7 @@ from telegram import (
     Update,
     CallbackQuery,    
 )
+from telegram import WebAppInfo
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError, TimedOut 
 from telegram.ext import (
@@ -2852,6 +2853,13 @@ def build_fragment_action_keyboard(
         ])
         keyboard.append([InlineKeyboardButton("━━━━━━━━━━ ✦ ━━━━━━━━━━", callback_data='separator')])
 
+    keyboard.append([
+        InlineKeyboardButton(
+            "🛠️ Открыть редактор",
+            web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id_str}_{story_id}")
+        )
+    ])
+    
     # --- Завершающие кнопки ---
     keyboard.append([
         InlineKeyboardButton("🗺️ Карта/Редактировать фрагменты", callback_data=f"edit_story_{user_id_str}_{story_id}")
