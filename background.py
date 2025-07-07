@@ -13,12 +13,15 @@ app = Flask(__name__, static_folder=BUILD_FOLDER, static_url_path='')
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def validate_fragment_name(name):
+    if name != "main_1" and name.startswith("main_1"):
+        return False, "Фрагмент main_1 является началом и не может быть переименован."
+
     if len(name) > 17:
         return False, "Название не должно быть длиннее 17 символов."
     if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
         return False, "Название может содержать только латиницу, кириллицу, цифры и нижнее подчеркивание."
     if name.count('_') > 1 or (name.count('_') == 1 and not re.search(r'_[0-9]+$', name)):
-         return False, "Допускается только одно нижнее подчеркивание перед цифрой в конце (например, GoLeft_6)."
+        return False, "Допускается только одно нижнее подчеркивание перед цифрой в конце (например, GoLeft_6)."
     return True, ""
 
 # --- API МАРШРУТЫ ---
