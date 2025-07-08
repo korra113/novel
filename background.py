@@ -245,6 +245,30 @@ def delete_choice(user_id_str, story_id):
     
     return jsonify({"error": "Связь не найдена"}), 404
 
+@app.route('/api/story/<user_id_str>/<story_id>/positions', methods=['GET'])
+def get_positions(user_id_str, story_id):
+    """
+    Отдает клиенту сохраненные позиции узлов для указанной истории.
+    """
+    from novel import load_node_positions
+    positions = load_node_positions(user_id_str, story_id)
+    # Если позиций нет, это не ошибка. Просто возвращаем пустой объект.
+    if positions:
+        return jsonify(positions)
+    return jsonify({})
+
+@app.route('/api/story/<user_id_str>/<story_id>/positions', methods=['POST'])
+def save_positions(user_id_str, story_id):
+    """
+    Получает от клиента и сохраняет в Firebase актуальные позиции узлов.
+    """
+    from novel import save_node_positions
+    positions = request.get_json()
+    if not positions:
+        return jsonify({"error": "Данные о позициях не предоставлены"}), 400
+    
+    save_node_positions(user_id_str, story_id, positions)
+    return jsonify({"status": "ok"})
 
 # --- React App Routing ---
 
