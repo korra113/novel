@@ -98,7 +98,7 @@ def init_firebase():
     try:
         firebase_admin.get_app()
     except ValueError:
-        cred = credentials.Certificate(cred_path)
+        cred = credentials.Certificate('/etc/secrets/firebase-key.json')
         firebase_admin.initialize_app(cred, {
             'databaseURL': 'https://otlzhka-default-rtdb.europe-west1.firebasedatabase.app/'
         })
