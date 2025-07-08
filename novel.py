@@ -92,8 +92,13 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "7553491252:AAFwKa2WzZ6wKMVUIGt18oxCGPNqvSo5oRA"  # <-- ЗАМЕНИ НА СВОЙ ТОКЕН БОТА
 
 def init_firebase():
-    if not firebase_admin._apps:
-        cred = credentials.Certificate('/etc/secrets/firebase-key.json')
+    """
+    Инициализирует приложение Firebase, если оно еще не было инициализировано.
+    """
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred, {
             'databaseURL': 'https://otlzhka-default-rtdb.europe-west1.firebasedatabase.app/'
         })
@@ -149,7 +154,7 @@ async def delete_inline_stories(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     try:
-        init_firebase()
+        
         ref = db.reference('story_settings')
         all_stories = ref.get()
 
@@ -279,7 +284,7 @@ def load_story_settings(inline_message_id: str) -> dict:
     Загружает конкретные настройки истории по ключу inline_message_id из 'story_settings'.
     """
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно загрузить story_settings.")
             return {}
@@ -309,7 +314,7 @@ def load_all_user_stories(user_id_str: str) -> dict:
     Не ищет среди других пользователей и не проверяет coop_edit.
     """
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -337,7 +342,7 @@ def load_all_coop_stories_with_user(user_id_str: str) -> dict:
     Загружает все истории всех пользователей, в которых user_id_str есть в списке coop_edit.
     """
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -374,7 +379,7 @@ def load_story_by_id_fallback(story_id: str) -> dict:
     """
     logger.info(f"История {story_id}.")    
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -411,7 +416,7 @@ def load_user_story(user_id_str: str, story_id: str) -> dict:
     Если не находит напрямую, ищет среди всех историй других пользователей с coop_edit доступом.
     """
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -462,7 +467,7 @@ def load_data() -> dict:
     ключей 'users_story' и 'story_settings' в возвращаемом словаре.
     """
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME: # Проверка, инициализировано ли приложение Firebase
             logger.error("Firebase приложение не инициализировано. Невозможно загрузить данные.")
             return {"users_story": {}, "story_settings": {}}
@@ -503,7 +508,7 @@ def save_story_data(user_id_str: str, story_id: str, story_content: dict):
     изменений, внесённых параллельно другим пользователем.
     """
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно сохранить данные истории.")
             return
@@ -608,7 +613,7 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
     user_id_str и story_id извлекаются из context.user_data['delete_candidate'].
     Предполагается, что user_id_str является владельцем истории.
     """
-    init_firebase()
+    
     if not firebase_admin._DEFAULT_APP_NAME:
         logger.error("Firebase приложение не инициализировано. Невозможно удалить историю.")
         if update.callback_query:
@@ -656,7 +661,7 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
     Сохраняет полное состояние истории/голосования в Firebase.
     Добавляет или обновляет время запуска.
     """
-    init_firebase()
+    
     if not inline_message_id:
         logger.error("save_story_state_to_firebase: inline_message_id is required.")
         return
@@ -713,7 +718,7 @@ def update_user_attributes(inline_message_id: str, user_attributes: dict):
     Обновляет только поле 'user_attributes' в story_settings/{inline_message_id}, 
     не затрагивая другие поля.
     """
-    init_firebase()
+    
     if not inline_message_id:
         logger.error("update_user_attributes: inline_message_id is required.")
         return
@@ -733,7 +738,7 @@ def save_story_data_to_file(all_data: dict) -> bool:
     Аналогично save_all_data_firebase, но с булевым возвратом.
     """
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно сохранить данные (и вернуть статус).")
             return False
@@ -755,7 +760,7 @@ def load_story_state_from_firebase(inline_message_id: str) -> dict | None:
     Загружает состояние истории/голосования из Firebase.
     Конвертирует данные из JSON-совместимых форматов обратно в нужные типы (например, list в set).
     """
-    init_firebase()
+    
     if not inline_message_id:
         logger.error("load_story_state_from_firebase: inline_message_id is required.")
         return None
@@ -782,7 +787,33 @@ def load_story_state_from_firebase(inline_message_id: str) -> dict | None:
 
 
 
+def save_node_positions(user_id_str: str, story_id: str, positions: dict):
+    """
+    Сохраняет позиции узлов для карты конкретной истории.
+    Использует путь 'story_maps/{user_id_str}/{story_id}'.
+    Метод .set() полностью перезаписывает данные, что является
+    корректным поведением для сохранения полного набора координат.
+    """
+    try:
+        
+        ref = db.reference(f'story_maps/{user_id_str}/{story_id}')
+        ref.set(positions)
+        logger.info(f"Позиции узлов для истории {story_id} сохранены.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении позиций узлов для истории {story_id}: {e}")
 
+def load_node_positions(user_id_str: str, story_id: str):
+    """
+    Загружает сохраненные позиции узлов для карты конкретной истории.
+    """
+    try:
+        
+        ref = db.reference(f'story_maps/{user_id_str}/{story_id}')
+        positions = ref.get()
+        return positions if positions else None
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке позиций узлов для истории {story_id}: {e}")
+        return None
 
 
 #===============================================================        
@@ -1661,7 +1692,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return "\n".join(lines)
 
     if not query_text:
-        init_firebase()
+        
         # Показываем все истории текущего пользователя
         user_stories_ref = db.reference(f'users_story/{user_id}')
         stories_to_show = user_stories_ref.get() or {}
@@ -1670,7 +1701,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         is_id_search = is_possible_story_id(query_text_lower)
 
         if is_id_search:
-            init_firebase()
+            
             # Поиск по всем историям всех пользователей только по ID
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
@@ -1678,7 +1709,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     stories_to_show[query_text_lower] = user_stories_dict[query_text_lower]
                     break  # Нашли — достаточно
         else:
-            init_firebase()
+            
             # Поиск по заголовкам только среди историй текущего пользователя
             user_stories = db.reference(f'users_story/{user_id}').get() or {}
             for story_id_key, story_content in user_stories.items():
@@ -1690,7 +1721,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Определяем владельца (нужно только если поиск был по ID)
         owner_user_id_for_story = user_id
         if is_possible_story_id(query_text):
-            init_firebase()
+            
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
                 if story_id in user_stories_dict:
@@ -3114,6 +3145,12 @@ def build_fragment_keyboard(
     keyboard.append([
         InlineKeyboardButton("🗺️ Посмотреть карту", callback_data=f"show_map_{story_id}")
     ])
+    keyboard.append([
+        InlineKeyboardButton(
+            "🛠️ Визуальный веб редактор и карта",
+            web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id_str}_{story_id}")
+        )
+    ])      
     # --- Кнопки навигации ---
     keyboard.append([InlineKeyboardButton("❔ Помощь по этому окну", callback_data="edithelp")])    
     keyboard.append([InlineKeyboardButton("◀️ Назад к списку историй", callback_data="view_stories")])
@@ -3480,6 +3517,7 @@ id истории — вы можете использовать его для �
 • 🌿 Посмотреть ветки — редактировать отдельную ветку, а не всю историю.
 • 💾 Скачать историю — сохранить файл. В будущем планируется возможность загрузки по файлу.
 • 🌍 Сделать публичной — отправить историю в раздел "Общие истории" главного меню.
+• 🛠️ Визуальный веб редактор — открывает редактирование и отображение вашей истории через удобный визуальный веб-редактор
 """
 
     await query.message.reply_text(
@@ -4888,7 +4926,8 @@ async def handle_nstory_command(update: Update, context: ContextTypes.DEFAULT_TY
             "Например: \n"
             "```\n"
             "/nstory история про ведьмака на 15 фрагментов\n"
-            "```",
+            "```"
+            "Нейросеть иногда сбоит возвращая неверную структуру которую бот не может считать. В таком случае попытайтесь ещё раз \n",
             parse_mode="MarkdownV2"
         )           
         return ConversationHandler.END
@@ -4901,6 +4940,34 @@ async def handle_nstory_command(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["story_id"] = uuid.uuid4().hex[:10]  # короткий id истории
 
     return await neural_story(update, context, clean_title)
+
+
+async def handle_full_nstory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message_text = update.message.text
+
+    # Убираем "/nstory" и всё, что после упоминания бота (например, /nstory@my_bot)
+    command_and_args = message_text.split(" ", 1)
+    if len(command_and_args) < 2:
+        await update.message.reply_text(
+            "❗ Пожалуйста, укажите о чём именно вы хотите сгенерировать историю после команды /nstory. Вы можете как дать общие указания касательно тематики, так и пошагово по фрагментам описать что именно вам нужно \n\n"
+            "Например: \n"
+            "```\n"
+            "/nstory история про ведьмака на 15 фрагментов. Первый фрагмент ознакомительный, во втором происходит распределение изначальных характеристик персонажа: внимание 7, сила 11, ловкость 8. Далее идут два фрагмента один из которых даёт...ти тд\n"
+            "```"
+            "Это весьма сложная для нейросети задача, поэтому во многих случаях она может возврщать неверные данные которые бот не сможет обработать или обработает не верно, в таком случае попытайтесь ещё раз \n",
+            parse_mode="MarkdownV2"
+        )           
+        return ConversationHandler.END
+
+    clean_title = command_and_args[1].strip()
+
+    # Устанавливаем user_id_str и сокращённый story_id
+    user = update.message.from_user
+    context.user_data["user_id_str"] = str(user.id)
+    context.user_data["story_id"] = uuid.uuid4().hex[:10]  # короткий id истории
+
+    return await neural_full_story(update, context, clean_title)
+
 
 
 async def handle_neuralstart_story_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5050,7 +5117,7 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
             logger.error(f"Ошибка при генерации истории для пользователя {user_id}: {e}")
             try:
                 await waiting_message.edit_text(
-                    "⚠️ Произошла ошибка при генерации истории. Попробуйте ещё раз позже."
+                    "⚠️ Произошла ошибка при генерации истории. Нейросеть иногда сбоит и возвращает не верные данные, попробуйте ещё раз."
                 )
             except Exception as e_edit:
                 logger.warning(f"Не удалось изменить сообщение ожидания при ошибке (neural_story): {e_edit}")
@@ -5063,6 +5130,87 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
 
     return ConversationHandler.END
 
+
+
+async def neural_full_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean_title: str) -> int:
+    user = update.message.from_user
+    user_id = user.id
+    username = user.full_name  # или user.username, если нужен ник
+    user_id_str = context.user_data.get("user_id_str")
+    story_id = context.user_data.get("story_id")
+
+    if not user_id_str or not story_id:
+        await update.message.reply_text("Произошла ошибка: не удалось определить пользователя или ID истории.")
+        return ConversationHandler.END
+
+    waiting_message = await update.message.reply_text(
+        "⌛ Генерирую историю с помощью нейросети. Пожалуйста, подождите..."
+    )
+
+    async def background_generation():
+        raw_response = None
+        try:
+            # Убедитесь, что generate_neural_story, save_story_data и DEBUG_DIR определены
+            raw_response = await generate_neural_story_full(clean_title)
+
+            if not isinstance(raw_response, str):
+                raw_response = json.dumps(raw_response, ensure_ascii=False)
+
+            start = raw_response.find('{')
+            end = raw_response.rfind('}') + 1
+            cleaned_json_str = raw_response[start:end]
+            generated_story = json.loads(cleaned_json_str)
+
+            if not isinstance(generated_story, dict) or \
+               "title" not in generated_story or \
+               "fragments" not in generated_story or \
+               not isinstance(generated_story["fragments"], dict):
+                raise ValueError("Ошибка в структуре сгенерированной истории")
+
+            generated_story["neural"] = True
+            generated_story["neuro_fragments"] = True    
+
+            # 👉 Добавляем автора:
+            generated_story["author"] = f"{username}"
+            generated_story["owner_id"] = f"{user_id}"
+
+            save_story_data(user_id_str, story_id, generated_story)
+
+            context.user_data['current_story'] = generated_story
+            context.user_data['current_fragment_id'] = "1" # Обычно начальный фрагмент
+            context.user_data['next_choice_index'] = 1
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")]
+            ])
+
+            await waiting_message.edit_text(
+                f"✅ <b>История успешно сгенерирована!</b>\n\n<b>Название: {generated_story['title']}</b>\n\nДля запуска воспользуйтесь кнопкой ниже",
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        except asyncio.CancelledError:
+            logger.info(f"Генерация истории для пользователя {user_id} была отменена.")
+            try:
+                await waiting_message.edit_text("Генерация истории была отменена.")
+            except Exception as e_edit:
+                logger.warning(f"Не удалось изменить сообщение ожидания при отмене (neural_story): {e_edit}")
+        except Exception as e:
+            logger.error(f"Ошибка при генерации истории для пользователя {user_id}: {e}")
+            try:
+                await waiting_message.edit_text(
+                    "⚠️ Произошла ошибка при генерации истории. Попробуйте ещё раз позже. Это весьма сложная для нейросети задача, поэтому во многих случаях она может возврщать неверные данные которые бот не сможет обработать или обработает не верно, в таком случае попытайтесь ещё раз"
+                )
+            except Exception as e_edit:
+                logger.warning(f"Не удалось изменить сообщение ожидания при ошибке (neural_story): {e_edit}")
+
+    # Создаем и сохраняем задачу
+    task = asyncio.create_task(background_generation())
+    user_tasks_set = context.user_data.setdefault('user_tasks', set())
+    user_tasks_set.add(task)
+    task.add_done_callback(lambda t: _remove_task_from_context(t, context.user_data))
+
+    return ConversationHandler.END
 
 
 
@@ -8225,7 +8373,7 @@ async def confirm_delete_all_neural(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def delete_all_neural_stories_firebase(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    init_firebase()
+    
     if not firebase_admin._DEFAULT_APP_NAME:
         logger.error("Firebase приложение не инициализировано.")
         if update.callback_query:
@@ -8304,7 +8452,7 @@ def get_user_progress_ref_path(story_id: str, user_id: int) -> str:
 def load_user_story_progress(story_id: str, user_id: int) -> dict:
     """Загружает current_effects и fragment_id пользователя для указанной истории."""
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME: # Проверка инициализации Firebase
             logger.error("Firebase приложение не инициализировано. Невозможно загрузить прогресс пользователя.")
             return {}
@@ -8318,7 +8466,7 @@ def load_user_story_progress(story_id: str, user_id: int) -> dict:
 def save_user_story_progress(story_id: str, user_id: int, progress_data: dict) -> None:
     """Сохраняет current_effects и fragment_id пользователя для указанной истории."""
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно сохранить прогресс пользователя.")
             return
@@ -8330,7 +8478,7 @@ def save_user_story_progress(story_id: str, user_id: int, progress_data: dict) -
 def clear_user_story_complete_progress(story_id: str, user_id: int) -> None:
     """Полностью стирает данные прохождения истории (fragment_id, current_effects) для пользователя."""
     try:
-        init_firebase()
+        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано. Невозможно очистить прогресс пользователя.")
             return
@@ -9703,7 +9851,7 @@ async def generate_gemini_response(query, full_story, current_fragment):
     try:
         google_search_tool = Tool(google_search=GoogleSearch())
         response = await client.aio.models.generate_content(
-            model='gemini-2.5-flash-preview-04-17',
+            model='gemini-2.5-flash',
             contents=context,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,                
@@ -9767,7 +9915,7 @@ async def generate_gemini_fragment(user_id, story_id, fragment_id):
 
     try:
         response = await client.aio.models.generate_content(
-            model='gemini-2.5-flash-preview-04-17',
+            model='gemini-2.5-flash',
             contents=context,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -9808,6 +9956,123 @@ async def generate_gemini_fragment(user_id, story_id, fragment_id):
         return "Произошла ошибка. Попробуйте позже."
 
 
+async def generate_neural_story_full(query):
+    """
+    Генерирует ответ от нейросети для визуальной новеллы.
+    Вход:
+        - query: тема истории
+    Возвращает:
+        - JSON в формате интерактивной истории
+    """
+
+    system_instruction = (
+        "Ты — нейросеть, создающая интерактивные текстовые истории в формате JSON для Telegram-бота. Истории имеют разветвлённую структуру с учётом пользовательских атрибутов. Вот строгие правила, которым ты должен следовать:\n\n"
+        
+        "1. Структура JSON:\n"
+        "   - Ключ \"title\": строка с названием истории.\n"
+        "   - Ключ \"fragments\": словарь фрагментов, где каждый ключ — уникальное имя фрагмента (например, main_1, rest_2).\n"
+        "   - Первый фрагмент ВСЕГДА должен иметь ключ 'main_1'.\n"
+        "   - Имена фрагментов: максимум 15 символов, разрешены кириллица, латиница и цифры, одно подчёркивание перед числом в конце — допустимо. Примеры: fight_1, сон_3, market_5.\n"
+        "   - Имена фрагментов должны логично отражать суть сцены.\n"
+        
+        "2. Каждый фрагмент содержит:\n"
+        "   - \"text\": текст фрагмента, который увидит пользователь. Внутри текста можно использовать вставку атрибутов в формате {{атрибут}} (например: 'Ваша сила: {{сила}}').\n"
+        "   - \"media\": всегда указывай пустой список: []\n"
+        "   - \"choices\": список вариантов (не более 10), каждый из которых — объект со следующими полями:\n"
+        "       - \"text\": подпись кнопки (до 25 символов).\n"
+        "       - \"target\": имя следующего фрагмента, на который ведёт выбор (обязательно должен существовать, без пробелов, максимум одно подчёркивание перед номером).\n"
+        "       - \"effects\": список эффектов (опционально). Каждый эффект — объект с:\n"
+        "           - \"stat\": имя атрибута (например, сила, мотивация, письмо и т.д.).\n"
+        "           - \"value\": может быть:\n"
+        "               - числом без знака (например, 3) — установить значение атрибута в 3;\n"
+        "               - со знаком + или - (например, +2, -5) — увеличить или уменьшить значение атрибута;\n"
+        "               - проверкой: >N, <N или =N — доступность выбора зависит от проверки. Например, '>5' означает, что выбор будет доступен только если значение атрибута больше 5.\n"
+        "           - \"hide\": true или false. Если true, то:\n"
+        "               - пользователь не увидит изменения атрибутов;\n"
+        "               - кнопка скрыта, если не проходят проверки (например, сила < 5).\n"
+        "             Если false:\n"
+        "               - пользователь видит сообщение об изменении атрибутов;\n"
+        "               - кнопка отображается всегда, но недоступна при несоответствии условий (можно нажимать несколько раз, пока не наберётся нужное значение).\n"
+
+        "3. Поведение эффектов с проверками:\n"
+        "   - Эффекты применяются СТРОГО ПО ПОРЯДКУ. Сначала начисления, потом проверки. Это позволяет реализовать накопительные действия (например, жать на кнопку, чтобы набрать силу).\n"
+        "   - Если сначала идёт проверка (>5), а потом начисление (+2), то кнопка НЕ БУДЕТ работать до выполнения условия.\n"
+
+        "4. Общие требования:\n"
+        "   - История должна быть логичной, интересной, с разветвлениями и вариативностью.\n"
+        "   - Разные фрагменты могут вести к одним и тем же целям.\n"
+        "   - Не создавай 'мертвые' переходы: каждый target должен вести к реально существующему фрагменту (если пользователь не просил иначе).\n"
+        "   - Разрешается делать незавершённые истории, если пользователь захочет их дописать позже, но только если явно указано.\n"
+        "   - Придерживайся указанного количества фрагментов или вариативно близкого (например, 12-15 при просьбе «на 13 сцен»).\n"
+        "   - Не выходи за пределы JSON — никакого текста вне структуры, пояснений или комментирования.\n\n"
+
+        "ВЫВОДИ ТОЛЬКО JSON. Пример структуры:\n"
+        "{\n"
+        "  \"title\": \"Пример истории\",\n"
+        "  \"fragments\": {\n"
+        "    \"main_1\": {\n"
+        "      \"text\": \"Вы проснулись утром. Ваша сила: {{сила}}\",\n"
+        "      \"media\": [],\n"
+        "      \"choices\": [\n"
+        "        {\n"
+        "          \"text\": \"Встать с кровати\",\n"
+        "          \"target\": \"start_day_2\",\n"
+        "          \"effects\": [\n"
+        "            {\"stat\": \"сила\", \"value\": \"+2\", \"hide\": false}\n"
+        "          ]\n"
+        "        },\n"
+        "        {\n"
+        "          \"text\": \"Полежать ещё\",\n"
+        "          \"target\": \"lazy_2\",\n"
+        "          \"effects\": [\n"
+        "            {\"stat\": \"мотивация\", \"value\": \"-1\", \"hide\": true}\n"
+        "          ]\n"
+        "        }\n"
+        "      ]\n"
+        "    },\n"
+        "    ...\n"
+        "  }\n"
+        "}"
+    )
+
+    context = (
+        f"Тема истории: {query}\n"
+        "Пожалуйста, создай законченную (или логично начатую) историю с богатой вариативностью и фрагментами, связанными между собой.\n"
+        "Начни с 'main_1'. Следи за логикой атрибутов и используй 'effects' и проверки, чтобы усилить погружение."
+    )
+    try:
+        google_search_tool = Tool(google_search=GoogleSearch())
+        response = await client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=context,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,                
+                temperature=1.7,
+                top_p=0.95,
+                top_k=25,
+                tools=[google_search_tool],
+                safety_settings=[
+                    types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
+                    types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE')
+                ]
+            )
+        )
+
+        if response.candidates and response.candidates[0].content.parts:
+            return "".join(
+                part.text for part in response.candidates[0].content.parts
+                if part.text and not getattr(part, "thought", False)
+            ).strip()
+        else:
+            return "Извините, я не смогла придумать подходящий ответ."
+    except Exception as e:
+        logger.error("Ошибка при генерации ответа от Gemini: %s", e)
+        return "Произошла ошибка. Попробуйте позже."
+
+
+
 async def generate_neural_story(query):
     """
     Генерирует ответ от нейросети для визуальной новеллы.
@@ -9846,7 +10111,7 @@ async def generate_neural_story(query):
     try:
         google_search_tool = Tool(google_search=GoogleSearch())
         response = await client.aio.models.generate_content(
-            model='gemini-2.5-flash-preview-04-17',
+            model='gemini-2.5-flash',
             contents=context,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,                
@@ -9873,6 +10138,10 @@ async def generate_neural_story(query):
     except Exception as e:
         logger.error("Ошибка при генерации ответа от Gemini: %s", e)
         return "Произошла ошибка. Попробуйте позже."
+
+
+
+
 
 
 
@@ -10047,7 +10316,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_inline_play, pattern=r"^inlineplay_"))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler) # Добавляем обработчик диалога
-    application.add_handler(CommandHandler("nstory", handle_nstory_command))    
+    application.add_handler(CommandHandler("nstory", handle_nstory_command))  
+    application.add_handler(CommandHandler("nfullstory", handle_full_nstory_command))  
+
     application.add_handler(CommandHandler("nd", delete_last)) 
     application.add_handler(CommandHandler("help", mainhelp_callback))  
     application.add_handler(CallbackQueryHandler(linkhelp_callback, pattern='^linkhelp$'))
@@ -10096,7 +10367,7 @@ def main() -> None:
     # ⬇️ Важно: обработчик любого текста вне диалога, вызывает start
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
 
-
+    init_firebase()
     keep_alive()#запускаем flask-сервер в отдельном потоке. Подробнее ниже...
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
