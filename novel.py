@@ -4922,14 +4922,11 @@ async def handle_nstory_command(update: Update, context: ContextTypes.DEFAULT_TY
     command_and_args = message_text.split(" ", 1)
     if len(command_and_args) < 2:
         await update.message.reply_text(
-            "❗ Пожалуйста, укажите о чём именно вы хотите сгенерировать историю после команды /nstory \n\n"
-            "Например: \n"
-            "```\n"
-            "/nstory история про ведьмака на 15 фрагментов\n"
-            "```"
-            "Нейросеть иногда сбоит возвращая неверную структуру которую бот не может считать. В таком случае попытайтесь ещё раз \n",
-            parse_mode="MarkdownV2"
-        )           
+            "❗ <b>Пожалуйста, укажите, о чём именно вы хотите сгенерировать историю после команды</b> <code>/nstory</code>\n\n"
+            "<b>Например:</b>\n"
+            "<pre>/nstory история про ведьмака на 15 фрагментов</pre>",
+            parse_mode="HTML"
+        )
         return ConversationHandler.END
 
     clean_title = command_and_args[1].strip()
@@ -4949,14 +4946,13 @@ async def handle_full_nstory_command(update: Update, context: ContextTypes.DEFAU
     command_and_args = message_text.split(" ", 1)
     if len(command_and_args) < 2:
         await update.message.reply_text(
-            "❗ Пожалуйста, укажите о чём именно вы хотите сгенерировать историю после команды /nstory. Вы можете как дать общие указания касательно тематики, так и пошагово по фрагментам описать что именно вам нужно \n\n"
-            "Например: \n"
-            "```\n"
-            "/nstory история про ведьмака на 15 фрагментов. Первый фрагмент ознакомительный, во втором происходит распределение изначальных характеристик персонажа: внимание 7, сила 11, ловкость 8. Далее идут два фрагмента один из которых даёт...ти тд\n"
-            "```"
-            "Это весьма сложная для нейросети задача, поэтому во многих случаях она может возврщать неверные данные которые бот не сможет обработать или обработает не верно, в таком случае попытайтесь ещё раз \n",
-            parse_mode="MarkdownV2"
-        )           
+            "❗ <b>Пожалуйста, укажите, о чём именно вы хотите сгенерировать историю после команды</b> <code>/nstory</code>\n\n"
+            "Вы можете как дать общие указания касательно тематики, так и пошагово по фрагментам описать, что именно вам нужно.\n\n"
+            "<b>Например:</b>\n"
+            "<pre>/nfullstory история про ведьмака на 15 фрагментов. Первый фрагмент ознакомительный, во втором происходит распределение изначальных характеристик персонажа: внимание 7, сила 11, ловкость 8. Далее идут два фрагмента, один из которых даёт... и т. д.</pre>\n"
+            "Это весьма сложная для нейросети задача, поэтому во многих случаях она может возвращать неверные данные, которые бот не сможет обработать или обработает неверно. В таком случае попробуйте ещё раз.",
+            parse_mode="HTML"
+        )    
         return ConversationHandler.END
 
     clean_title = command_and_args[1].strip()
@@ -4967,7 +4963,6 @@ async def handle_full_nstory_command(update: Update, context: ContextTypes.DEFAU
     context.user_data["story_id"] = uuid.uuid4().hex[:10]  # короткий id истории
 
     return await neural_full_story(update, context, clean_title)
-
 
 
 async def handle_neuralstart_story_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
