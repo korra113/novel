@@ -2093,7 +2093,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
                     [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
                     [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
-                    [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
+                    [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
+                    [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],                    
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2152,7 +2153,8 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
         [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
         [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
-        [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
+        [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
+        [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],   
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -3587,7 +3589,8 @@ async def linkhelp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         help_text,
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
+            [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
+            [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],   
             [InlineKeyboardButton("❌ Закрыть", callback_data="delete_this_message")]
         ])
     )
@@ -3655,7 +3658,8 @@ async def mainhelp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         help_text,
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
+            [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
+            [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],   
             [InlineKeyboardButton("❌ Закрыть", callback_data="delete_this_message")]
         ])
     )
