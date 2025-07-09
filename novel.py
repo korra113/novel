@@ -2904,7 +2904,7 @@ def build_fragment_action_keyboard(
 
     keyboard.append([
         InlineKeyboardButton(
-            "🛠️ Открыть редактор",
+            "🛠️ Открыть веб редактор",
             web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id_str}_{story_id}")
         )
     ])
@@ -6170,7 +6170,12 @@ async def show_fragment_actions(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("✏️ Редактировать текст кнопок", callback_data=f'edit_choice_start_{fragment_id}')
         ])
         keyboard.append([InlineKeyboardButton("━━━━━━━━━━ ✦ ━━━━━━━━━━", callback_data='separator')])
-
+    keyboard.append([
+        InlineKeyboardButton(
+            "🛠️ Открыть веб редактор",
+            web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id_str}_{story_id}")
+        )
+    ])
     keyboard.append([
         InlineKeyboardButton("🗺️ Карта/Редактировать структуру", callback_data=f"edit_story_{user_id_str}_{story_id}")
     ])
