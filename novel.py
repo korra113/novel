@@ -2091,7 +2091,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if chat_type == "private":
                 keyboard = [
                     [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-                    [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
+                    [InlineKeyboardButton("✏️Управление моими историями", callback_data='view_stories')],
                     [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
                     [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
                     [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],                    
@@ -2151,7 +2151,7 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # Отправляем подтверждение и главное меню (дублируем логику start)
     keyboard = [
         [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-        [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
+        [InlineKeyboardButton("✏️Управление моими историями", callback_data='view_stories')],
         [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
         [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
         [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],   
