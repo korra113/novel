@@ -1679,29 +1679,34 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     results = []
     user_id = str(update.inline_query.from_user.id)
     stories_to_show = {}
+    # Определяем is_id_search в начале, чтобы использовать его позже
+    is_id_search = is_possible_story_id(query_text.lower()) if query_text else False
 
-    def format_story_text(story_id: str, story_data: dict) -> str:
+    def format_story_text(story_id: str, story_data: dict, bot_username: str) -> str:
+        """Форматирует текст сообщения для инлайн-результата."""
         title = story_data.get("title", "Без названия")
         neural = story_data.get("neural", False)
         author = story_data.get("author")
+        # Создаем URL для ссылки
+        url = f"https://t.me/{bot_username}?start={story_id}"
+
         lines = [f"📖 <b>История:</b> «{clean_caption(title)}»"]
         if author:
             lines.append(f"✍️ <b>Автор:</b> {clean_caption(author)}{' (нейроистория)' if neural else ''}")
         lines.append(f"🆔 <b>ID:</b> <code>{story_id}</code>")
+        # --- Добавлена новая строка со ссылкой ---
+        lines.append(f"🔗 <b>Ссылка:</b> {url}")
+        # ---
         lines.append("\n<i>Нажмите кнопку ниже, чтобы настроить и запустить историю в этом чате.</i>")
         return "\n".join(lines)
 
     if not query_text:
-        
         # Показываем все истории текущего пользователя
         user_stories_ref = db.reference(f'users_story/{user_id}')
         stories_to_show = user_stories_ref.get() or {}
     else:
         query_text_lower = query_text.lower()
-        is_id_search = is_possible_story_id(query_text_lower)
-
         if is_id_search:
-            
             # Поиск по всем историям всех пользователей только по ID
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
@@ -1709,7 +1714,6 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     stories_to_show[query_text_lower] = user_stories_dict[query_text_lower]
                     break  # Нашли — достаточно
         else:
-            
             # Поиск по заголовкам только среди историй текущего пользователя
             user_stories = db.reference(f'users_story/{user_id}').get() or {}
             for story_id_key, story_content in user_stories.items():
@@ -1718,10 +1722,8 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     stories_to_show[story_id_key] = story_content
 
     for story_id, story_data in stories_to_show.items():
-        # Определяем владельца (нужно только если поиск был по ID)
         owner_user_id_for_story = user_id
-        if is_possible_story_id(query_text):
-            
+        if is_id_search:
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
                 if story_id in user_stories_dict:
@@ -1736,14 +1738,18 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             id=str(uuid4()),
             title=f"История: {story_data.get('title', 'Без названия')}",
             description=f"Автор: {story_data.get('author', 'Неизвестен')}",
-            input_message_content=InputTextMessageContent(format_story_text(story_id, story_data), parse_mode="HTML"),
+            # --- Передаем context.bot.username в функцию форматирования ---
+            input_message_content=InputTextMessageContent(
+                format_story_text(story_id, story_data, context.bot.username),
+                parse_mode="HTML"
+            ),
+            # ---
             reply_markup=buttons
         ))
         if len(results) >= 49:
             break
 
     await update.inline_query.answer(results, cache_time=10)
-
 
 
 
@@ -5255,7 +5261,7 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"_Им будет достаточно просто отправить этот ID боту, и бот тут же запустит вашу историю._\n\n"
         f"*Теперь отправьте контент для первого фрагмента.*\n"
         f"_Это может быть текст, фото (с подписью или без), видео, GIF или аудио._\n"
-        f"_Поддерживается вся доступная в телеграм разметка, например спойлеры. А также тэги для автоматической смены слайдов и редактирования текста. Для подробностей пройдите обучение из главного меню._"
+        f"_Поддерживается вся доступная в телеграм разметка, например жирный текст, спойлеры и прочее."
     )
 
     await update.message.reply_text(
