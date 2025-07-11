@@ -629,7 +629,7 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("Ошибка: данные для удаления истории не найдены в сессии.", show_alert=True)
         return
 
-    story_ref .reference(f'users_story/{user_id_owner}/{story_id_to_delete}')
+    story_ref = db.reference(f'users_story/{user_id_owner}/{story_id_to_delete}')
 
     try:
         if story_ref.get() is None:
