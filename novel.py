@@ -2756,7 +2756,7 @@ def get_fragments_for_deletion_preview(
 
 
 from html.parser import HTMLParser
-
+from bs4 import BeautifulSoup
 class HTMLTextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -2810,14 +2810,74 @@ def build_legend_text(story_data: dict, fragment_ids: list[str]) -> str:
         text = fragment.get("text", "")
         # logger.info(f"text '{text}'") # Закомментировано, если не используется
         if text:
-            clean_text = strip_html_tags(text)
-            line_parts.append(f"«{clean_text[:25]}»" + ("…" if len(clean_text) > 30 else ""))
+            trimmed_html = trim_html_preserving_tags(text, 25)
+            clean_text = strip_html_tags(trimmed_html)
+            line_parts.append(f"«{clean_text}»" + ("…" if len(strip_html_tags(text)) > 30 else ""))
 
 
         lines.append(" ".join(line_parts))
 
     return "\n".join(lines) if lines else ""
 
+def trim_html_preserving_tags(html: str, max_length: int) -> str:
+    """Обрезает HTML-текст, не ломая теги и сохраняя валидный HTML"""
+    soup = BeautifulSoup(html, 'html.parser')
+    current_length = 0
+    result_fragments = []
+
+    def traverse(node):
+        nonlocal current_length
+        if current_length >= max_length:
+            return None
+
+        if isinstance(node, str):
+            remaining = max_length - current_length
+            piece = node[:remaining]
+            current_length += len(piece)
+            return piece
+
+        elif node.name:
+            new_node = soup.new_tag(node.name, **node.attrs)
+            for child in node.contents:
+                child_trimmed = traverse(child)
+                if child_trimmed is None:
+                    break
+                new_node.append(child_trimmed)
+            return new_node
+
+    trimmed_content = []
+    for element in soup.contents:
+        trimmed = traverse(element)
+        if trimmed:
+            trimmed_content.append(trimmed)
+
+    return ''.join(str(x) for x in trimmed_content)
+
+def clean_html_for_telegram(html_text: str) -> str:
+    allowed_tags = {
+        "b", "strong", "i", "em", "u", "ins",
+        "s", "strike", "del", "code", "pre", "a", "span",
+        "blockquote", "expandable_blockquote"
+    }
+
+    # Парсим HTML
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    for tag in soup.find_all(True):
+        tag_name = tag.name
+
+        if tag_name not in allowed_tags:
+            tag.unwrap()
+        elif tag_name == "span":
+            # Разрешаем только <span class="tg-spoiler">
+            if tag.get("class") != ["tg-spoiler"]:
+                tag.unwrap()
+        elif tag_name == "a":
+            # Удаляем <a> без href
+            if not tag.get("href"):
+                tag.unwrap()
+
+    return str(soup)
 
 
 def build_fragment_action_keyboard(
@@ -4509,6 +4569,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         }
 
         current_text = fragment_data.get("text", "")
+        text_to_send = clean_html_for_telegram(current_text)        
         current_media = fragment_data.get("media", [])
         
         # === Добавляем проверку на пустоту текста и медиа ===
@@ -4544,7 +4605,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await query.edit_message_text(
             f"Выбран фрагмент: <code>{target_fragment_id}</code>\n"
-            f"Текущий текст: \n✦ ━━━━━━━━━━\n{current_text or '*Нет текста*'}\n✦ ━━━━━━━━━━{media_desc}\n\n"
+            f"Текущий текст: \n✦ ━━━━━━━━━━\n{text_to_send or '*Нет текста*'}\n✦ ━━━━━━━━━━{media_desc}\n\n"
             f"<b>Любой отправленный сейчас боту текст и/или медиа (фото, видео, gif, аудио) заменят текущее содержимое фрагмента.</b>\n"
             f"Либо воспользуйтесь одной из кнопок:",
             reply_markup=reply_markup,
@@ -4594,6 +4655,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
             # Показываем текущее содержимое фрагмента (опционально, но полезно)
             current_text = fragment_data.get("text", "*Нет текста*")
+            text_to_send = clean_html_for_telegram(current_text)          
             current_media = fragment_data.get("media", [])
             media_desc = ""
             if current_media:
@@ -4653,7 +4715,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # Собираем финальный текст
             await query.message.reply_text(
                 f"Редактирование фрагмента: <code>{fragment_id_to_edit}</code>\n"
-                f"Текущий текст: \n✦ ━━━━━━━━━━\n{current_text}\n✦ ━━━━━━━━━━{media_desc}"
+                f"Текущий текст: \n✦ ━━━━━━━━━━\n{text_to_send}\n✦ ━━━━━━━━━━{media_desc}"
                 f"{effects_info}\n\n"
                 f"➡️ <b>Отправьте новый текст и/или медиа (фото, видео, gif, аудио) для этого фрагмента.</b>\n"
                 f"Новый контент полностью заменит старый.",
@@ -5769,7 +5831,7 @@ async def handle_new_choice_text(update: Update, context: ContextTypes.DEFAULT_T
 
     check_text = re.sub(r"\{\{.*?\}\}", '', new_text).strip()
 
-    if not check_text or len(check_text) > 35: # Ограничение длины текста кнопки
+    if not check_text or len(check_text) > 355: # Ограничение длины текста кнопки
         await update.message.reply_text("Текст кнопки не может быть пустым и должен быть не длиннее 35 символов. Попробуйте снова:")
         return AWAITING_NEW_CHOICE_TEXT
 
@@ -6037,6 +6099,7 @@ async def confirm_delete_choice(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Повторно показать фрагмент с обновлённой клавиатурой
     current_text = fragment.get("text", "") or "*Нет текста*"
+    text_to_send = clean_html_for_telegram(current_text)    
     media_desc = ""
     current_media = fragment.get("media", [])
     if current_media:
@@ -6059,7 +6122,7 @@ async def confirm_delete_choice(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         f"Связь <code>{choice_text}</code> удалена из фрагмента <code>{fragment_id}</code>.{warning_text}\n\n"
         f"Фрагмент: <code>{fragment_id}</code>\n"
-        f"Текущий текст: \n<pre>{current_text}</pre>{media_desc}\n\n"
+        f"Текущий текст: \n<pre>{text_to_send}</pre>{media_desc}\n\n"
         f"Вы можете изменить его или воспользоваться кнопками ниже:",
         reply_markup=reply_markup,
         parse_mode=ParseMode.HTML
@@ -6245,7 +6308,7 @@ async def show_fragment_actions(update: Update, context: ContextTypes.DEFAULT_TY
     text_lines.append("Либо выберите действие:")
 
     text_to_send = "\n".join(text_lines)
-
+    text_to_send = clean_html_for_telegram(text_to_send)
     # Попробуем отредактировать, если это был callback_query
     if update.callback_query:
         try:
@@ -6548,7 +6611,7 @@ async def ask_link_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Текст кнопки не может быть пустым. Попробуйте еще раз:")
         return ASK_LINK_TEXT
 
-    if len(check_text) > 35:
+    if len(check_text) > 355:
         await update.message.reply_text("Текст кнопки не должен превышать 35 символов. Попробуйте еще раз:")
         return ASK_LINK_TEXT
 
@@ -6732,6 +6795,7 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
         }
 
         current_text = fragment_data.get("text", "*Нет текста*")
+        text_to_send = clean_html_for_telegram(current_text)        
         current_media = fragment_data.get("media", [])
         media_desc = ""
         if current_media:
@@ -6754,7 +6818,7 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
 
         await query.edit_message_text(
             f"Рдактирование фгмента: <code>{target_fragment_id}</code>\n"
-            f"Текущий текст: \n<pre>{current_text or '*Нет текста*'}</pre>{media_desc}\n\n"
+            f"Текущий текст: \n<pre>{text_to_send or '*Нет текста*'}</pre>{media_desc}\n\n"
             f"➡️ <b>Отправьте новый текст и/или медиа (фото, видео, gif, аудио) для этого фрагмента.</b>\n"
             f"Новый контент полностью заменит старый.",           
             reply_markup=reply_markup,
@@ -7003,7 +7067,7 @@ async def ask_continue_text_handler(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("Текст кнопки не может быть пустым. Попробуйте еще раз:")
         return ASK_CONTINUE_TEXT
     # Проверка длины текста кнопки
-    if len(check_text) > 35:
+    if len(check_text) > 355:
         await update.message.reply_text("Текст кнопки не должен превышать 35 символов. Попробуйте еще раз:")
         return ASK_CONTINUE_TEXT  # Остаемся в том же состоянии
 
@@ -7086,7 +7150,7 @@ async def ask_branch_text_handler(update: Update, context: ContextTypes.DEFAULT_
     if not check_text:
         await update.message.reply_text("Текст кнопки не может быть пустым. Попробуйте еще раз:")
         return ASK_LINK_TEXT
-    if len(check_text) > 35:  # Увеличено ограничение для текста с эффектами
+    if len(check_text) > 355:  # Увеличено ограничение для текста с эффектами
         await update.message.reply_text("Текст кнопки не должен превышать 35 символов. Попробуйте еще раз:")
         return ASK_BRANCH_TEXT
 
