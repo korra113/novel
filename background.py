@@ -9,7 +9,8 @@ BUILD_FOLDER = os.path.join(os.path.dirname(__file__), 'client', 'build')
 TELEGRAM_BOT_TOKEN = "7923930676:AAEkCg6-E35fyRnAzvxqoZvgEo8o8KTT8EU"
 
 app = Flask(__name__, static_folder=BUILD_FOLDER, static_url_path='')
-
+logging.getLogger("httpx").setLevel(logging.WARNING) # Уменьшает спам от http запросов
+logger = logging.getLogger(__name__)
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def validate_fragment_name(name):
@@ -188,6 +189,7 @@ def get_telegram_file(file_id):
     )
 
 
+
 # Эндпоинт для обновления конкретного choice (связи)
 @app.route('/api/story/<user_id_str>/<story_id>/choice', methods=['PUT'])
 def update_choice(user_id_str, story_id):
@@ -283,6 +285,112 @@ def react_router_entry(user_story):
         else:
             return send_from_directory(app.static_folder, 'index.html')
 
+
+import logging
+
+# Убедитесь, что логирование настроено
+logging.basicConfig(level=logging.INFO)
+
+@app.route('/api/upload_media', methods=['POST'])
+def upload_media():
+    file = request.files.get('file')
+    if not file:
+        logging.warning('Файл не передан в запросе')
+        return jsonify({'error': 'Файл не передан'}), 400
+
+    file_bytes = file.read()
+    filename = file.filename.lower()
+    logging.info(f'Загружен файл: {filename}, размер: {len(file_bytes)} байт')
+
+    # Определим тип медиа
+    if filename.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+        send_method = 'sendPhoto'
+        field = 'photo'
+        media_type = 'photo'
+    elif filename.endswith(('.mp4', '.mov', '.webm')):
+        send_method = 'sendVideo'
+        field = 'video'
+        media_type = 'video'
+    elif filename.endswith(('.mp3', '.ogg', '.wav', '.m4a')):
+        send_method = 'sendAudio'
+        field = 'audio'
+        media_type = 'audio'
+    elif filename.endswith(('.gif')):
+        send_method = 'sendAnimation'
+        field = 'animation'
+        media_type = 'animation'
+    else:
+        logging.error(f'Неподдерживаемый формат файла: {filename}')
+        return jsonify({'error': 'Неподдерживаемый формат файла'}), 400
+
+    # Отправим файл себе (боту) в "немой" чат
+    url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{send_method}'
+    files = {field: (file.filename, file_bytes)}
+    user_id = request.form.get('user_id')
+    if not user_id:
+        return jsonify({'error': 'user_id не передан'}), 400
+
+    data = {'chat_id': user_id}  
+
+    try:
+        logging.info(f'Отправка запроса в Telegram: {send_method}')
+        response = requests.post(url, files=files, data=data)
+        logging.info(f'Telegram ответил статусом {response.status_code}')
+        logging.debug(f'Ответ Telegram: {response.text}')
+
+        result = response.json()
+        if not result.get('ok'):
+            logging.error(f'Ошибка Telegram API: {result}')
+            return jsonify({'error': 'Не удалось отправить медиа в Telegram', 'details': result}), 500
+
+        file_obj = result['result'][field] if isinstance(result['result'][field], dict) else result['result'][field][-1]
+        file_id = file_obj['file_id']
+
+        logging.info(f'Успешно получен file_id: {file_id}')
+        return jsonify({'file_id': file_id, 'type': media_type})
+    except Exception as e:
+        logging.exception('Исключение при отправке медиа')
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/story/<user_id_str>/<story_id>/fragment/<fragment_id>/add_media', methods=['POST'])
+def add_media(user_id_str, story_id, fragment_id):
+    from novel import load_all_user_stories, save_story_data
+    data = request.get_json()
+
+    file_id = data.get("file_id")
+    media_type = data.get("type")
+    if not file_id or not media_type:
+        return jsonify({"error": "file_id и type обязательны"}), 400
+
+    all_stories = load_all_user_stories(user_id_str)
+    story = all_stories.get(story_id)
+    if not story or "fragments" not in story or fragment_id not in story["fragments"]:
+        return jsonify({"error": "Фрагмент не найден"}), 404
+
+    media_entry = {"file_id": file_id, "type": media_type}
+    story["fragments"][fragment_id].setdefault("media", []).append(media_entry)
+    save_story_data(user_id_str, story_id, story)
+
+    return jsonify({"status": "ok"})
+@app.route('/api/story/<user_id_str>/<story_id>/fragment/<fragment_id>/media', methods=['PUT'])
+def update_media(user_id_str, story_id, fragment_id):
+    from novel import load_all_user_stories, save_story_data
+    data = request.get_json()
+    media_array = data.get("media")
+
+    if media_array is None:
+        return jsonify({"error": "Массив media обязателен"}), 400
+
+    all_stories = load_all_user_stories(user_id_str)
+    story = all_stories.get(story_id)
+    if not story or "fragments" not in story or fragment_id not in story["fragments"]:
+        return jsonify({"error": "Фрагмент не найден"}), 404
+
+    story["fragments"][fragment_id]["media"] = media_array
+    save_story_data(user_id_str, story_id, story)
+
+    return jsonify({"status": "ok"})
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
