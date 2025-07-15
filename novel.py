@@ -6972,7 +6972,6 @@ def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str
         full_tag = match.group(0)
         content = match.group(1).strip()
 
-        # Поддержка нескольких атрибутов через запятую
         items = [item.strip() for item in content.split(',') if item.strip()]
         for item in items:
             if ':' not in item:
@@ -6981,14 +6980,18 @@ def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str
             else:
                 phrase, value_part = map(str.strip, item.split(':', 1))
 
-            # Проверка на значение с возможным (hide)
-            value_match = re.fullmatch(r"([+\-<>=]?)\s*(\d+)\s*(?:\((hide)\))?", value_part, re.IGNORECASE)
+            # Поддержка значений вроде: +2, =3, 1-5, -2--1, 5-10 (и (hide))
+            value_match = re.fullmatch(
+                r"([+\-<>=]?)\s*(-?\d+(?:\s*-\s*-?\d+)?)(?:\s*\((hide)\))?",
+                value_part, re.IGNORECASE
+            )
+
             if not value_match:
-                errors.append(f"Ошибка в теге {full_tag}: неверный формат значения '{value_part}'. Пример: +2, -1 (hide), =3 и т.п.")
+                errors.append(f"Ошибка в теге {full_tag}: неверный формат значения '{value_part}'. Пример: +2, -1 (hide), 5-10 и т.п.")
                 continue
 
             symbol = value_match.group(1)
-            number = value_match.group(2)
+            number = value_match.group(2).replace(' ', '')  # удаляем пробелы из диапазона
             hide = value_match.group(3) is not None
 
             effects.append({
@@ -6997,7 +7000,6 @@ def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str
                 "hide": hide
             })
 
-        # Удаляем тег из текста
         clean_text = clean_text.replace(full_tag, '').strip()
 
     return clean_text, effects, errors
