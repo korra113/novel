@@ -200,6 +200,177 @@ async def delete_inline_stories(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Произошла ошибка при удалении.")
 
 
+COLLECTING_MEDIA = 101
+
+# Настройка логирования, чтобы видеть ошибки
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
+async def startsend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает процесс сбора медиа для рассылки."""
+    # Инициализируем список для хранения сообщений в user_data
+    # user_data предпочтительнее, т.к. сборка привязана к конкретному админу
+    context.user_data['media_for_sending'] = []
+    
+    await update.message.reply_text(
+        "✅ **Режим сбора медиа активирован.**\n\n"
+        "Присылайте мне фото, видео, документы или текст. "
+        "Они будут добавлены в очередь на рассылку.\n\n"
+        "Когда закончите, используйте команду:\n"
+        "`/endsend user_id1,user_id2,...`\n\n"
+        "Для отмены используйте /cancelsend.",
+        parse_mode='Markdown'
+    )
+    
+    return COLLECTING_MEDIA
+
+
+async def collect_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Собирает любое присланное сообщение (медиа или текст) в список."""
+    if 'media_for_sending' not in context.user_data:
+        # На случай, если что-то пошло не так
+        context.user_data['media_for_sending'] = []
+        
+    # Просто сохраняем всё сообщение. Это самый надежный способ
+    # сохранить и file_id, и caption, и media_group_id.
+    context.user_data['media_for_sending'].append(update.message)
+    
+    count = len(context.user_data['media_for_sending'])
+    await update.message.reply_text(f"📥 Добавлено в рассылку. Всего в очереди: {count}.")
+    
+    # Остаемся в том же состоянии, ожидая новых сообщений
+    return COLLECTING_MEDIA
+
+
+async def endsend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Завершает сбор и рассылает собранный контент."""
+    user_ids_str = " ".join(context.args)
+    if not user_ids_str:
+        await update.message.reply_text(
+            "⚠️ Вы не указали ID пользователей для рассылки.\n"
+            "Пример: `/nsend 12345678, 87654321`",
+            parse_mode='Markdown'
+        )
+        return COLLECTING_MEDIA # Остаемся в состоянии сбора
+
+    media_to_send = context.user_data.get('media_for_sending')
+    if not media_to_send:
+        await update.message.reply_text("⚠️ Очередь рассылки пуста. Нечего отправлять.")
+        # Выходим из состояния
+        context.user_data.pop('media_for_sending', None)
+        return ConversationHandler.END
+        
+    try:
+        user_ids = [int(uid.strip()) for uid in user_ids_str.split(',')]
+    except ValueError:
+        await update.message.reply_text("❌ Ошибка: ID пользователей должны быть целыми числами, разделенными запятой.")
+        return COLLECTING_MEDIA
+
+    await update.message.reply_text(f"🚀 Начинаю рассылку для {len(user_ids)} пользователей...")
+
+    successful_sends = 0
+    failed_sends = 0
+
+    # Группируем сообщения по media_group_id
+    grouped_messages = defaultdict(list)
+    single_messages = []
+
+    for msg in media_to_send:
+        if msg.media_group_id:
+            grouped_messages[msg.media_group_id].append(msg)
+        else:
+            single_messages.append(msg)
+            
+    # Объединяем все в один упорядоченный список для отправки
+    ordered_send_list = []
+    processed_group_ids = set()
+
+    # Сначала добавляем одиночные сообщения и группы в том порядке, в котором они были добавлены
+    for msg in media_to_send:
+        if msg.media_group_id:
+            if msg.media_group_id not in processed_group_ids:
+                # Сортируем сообщения внутри группы по времени отправки
+                group = sorted(grouped_messages[msg.media_group_id], key=lambda m: m.message_id)
+                ordered_send_list.append(group)
+                processed_group_ids.add(msg.media_group_id)
+        else:
+            ordered_send_list.append(msg)
+
+
+    # Основной цикл рассылки
+    for user_id in user_ids:
+        try:
+            for item in ordered_send_list:
+                # СЛУЧАЙ 1: Это медиагруппа (представлена как список)
+                if isinstance(item, list):
+                    # Логика сборки медиагруппы, как в вашем `nsend`
+                    media_group_list = []
+                    caption = None
+                    caption_entities = None
+                    # Находим подпись в группе
+                    for msg in item:
+                        if msg.caption:
+                            caption = msg.caption
+                            caption_entities = msg.caption_entities
+                            break
+                    
+                    is_first = True
+                    for msg in item:
+                        # Формируем InputMedia... объекты
+                        current_caption = caption if is_first else None
+                        current_entities = caption_entities if is_first else None
+                        
+                        if msg.photo:
+                            media_group_list.append(InputMediaPhoto(media=msg.photo[-1].file_id, caption=current_caption, caption_entities=current_entities))
+                        elif msg.video:
+                            media_group_list.append(InputMediaVideo(media=msg.video.file_id, caption=current_caption, caption_entities=current_entities))
+                        elif msg.document:
+                            media_group_list.append(InputMediaDocument(media=msg.document.file_id, caption=current_caption, caption_entities=current_entities))
+                        elif msg.audio:
+                             media_group_list.append(InputMediaAudio(media=msg.audio.file_id, caption=current_caption, caption_entities=current_entities))
+                        is_first = False
+
+                    if media_group_list:
+                         await context.bot.send_media_group(chat_id=user_id, media=media_group_list)
+
+                # СЛУЧАЙ 2: Это обычное сообщение
+                else:
+                    await context.bot.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=item.chat_id,
+                        message_id=item.message_id
+                    )
+                await asyncio.sleep(0.1) # Пауза между отправками, чтобы не попасть в лимиты
+            
+            successful_sends += 1
+        except Exception as e:
+            logger.error(f"Не удалось отправить рассылку пользователю {user_id}: {e}")
+            failed_sends += 1
+
+    await update.message.reply_text(
+        f"✅ **Рассылка завершена!**\n\n"
+        f"Успешно отправлено: {successful_sends} пользователям\n"
+        f"Не удалось отправить: {failed_sends} пользователям"
+    )
+
+    # Очищаем данные и выходим из состояния
+    context.user_data.pop('media_for_sending', None)
+    return ConversationHandler.END
+
+
+async def cancelsend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет процесс сбора медиа и очищает очередь."""
+    context.user_data.pop('media_for_sending', None)
+    await update.message.reply_text("❌ Сбор медиа отменен. Очередь очищена.")
+    return ConversationHandler.END
+
+
+
+
+
 async def admin_upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Пожалуйста, отправьте JSON-файл для загрузки в Firebase.")
     return ADMIN_UPLOAD
@@ -1740,8 +1911,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             description=f"Автор: {story_data.get('author', 'Неизвестен')}",
             # --- Передаем context.bot.username в функцию форматирования ---
             input_message_content=InputTextMessageContent(
-                format_story_text(story_id, story_data, context.bot.username),
-                parse_mode="HTML"
+                format_story_text(story_id, story_data, context.bot.username)
             ),
             # ---
             reply_markup=buttons
@@ -5288,8 +5458,10 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user = update.message.from_user
     username = user.full_name  # Либо .username для @никнейма
     user_id_str = str(user.id)
-    title = update.message.text.strip()
-
+    title = update.message.text.strip()    
+    # # Вариант 2: HTML (самый надежный)
+    escaped_title = html.escape(title)
+    current_parse_mode = ParseMode.HTML
     story_id = uuid.uuid4().hex[:10]
 
     context.user_data['user_id_str'] = user_id_str
@@ -5316,23 +5488,24 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     ])
 
     message_text = (
-        f"*Отлично!*\n"
-        f"Название истории: *{title}*\n"
-        f"Уникальный ID истории: `{story_id}`\n"
-        f"_Сейчас или в дальнейшем вы сможете скопировать его и отправить другим людям._\n"
-        f"_Им будет достаточно просто отправить этот ID боту, и бот тут же запустит вашу историю._\n\n"
-        f"*Теперь отправьте контент для первого фрагмента.*\n"
-        f"_Это может быть текст, фото (с подписью или без), видео, GIF или аудио._\n"
-        f"_Поддерживается вся доступная в телеграм разметка, например жирный текст, спойлеры и прочее._"
+        f"<b>Отлично!</b>\n"
+        f"Название истории: <b>{escaped_title}</b>\n"
+        f"Уникальный ID истории: <code>{story_id}</code>\n"
+        f"<i>Сейчас или в дальнейшем вы сможете скопировать его и отправить другим людям.</i>\n"
+        f"<i>Им будет достаточно просто отправить этот ID боту, и бот тут же запустит вашу историю.</i>\n\n"
+        f"<b>Теперь отправьте контент для первого фрагмента.</b>\n"
+        f"<i>Это может быть текст, фото (с подписью или без), видео, GIF или аудио.</i>\n"
+        f"<i>Поддерживается вся доступная в телеграм разметка, например спойлеры. А также тэги для автоматической смены слайдов и редактирования текста. Для подробностей пройдите обучение из главного меню.</i>"
     )
 
     await update.message.reply_text(
         message_text,
         reply_markup=keyboard,
-        parse_mode='Markdown'
+        parse_mode=current_parse_mode
     )
 
     return ADD_CONTENT
+    
 
 async def confirm_replace_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -8503,12 +8676,13 @@ async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton("◀️ Нет, вернуться", callback_data="view_stories")
         ]
     ])
-
+    story_title = html.escape(story_title)
     await query.edit_message_text(
-        f"Вы уверены, что хотите удалить историю *«{story_title}»*?",
+        f"Вы уверены, что хотите удалить историю <b>«{story_title}»</b>?",
         reply_markup=keyboard,
-        parse_mode='Markdown'
+        parse_mode='HTML'
     )
+
 
 
 
@@ -10253,10 +10427,33 @@ def main() -> None:
 
 
     application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(InlineQueryHandler(inlinequery))
+
     # Определяем состояния (убедитесь, что все константы импортированы/определены)
     # ASK_TITLE, ADD_CONTENT, ASK_CONTINUE_TEXT, ASK_BRANCH_TEXT, EDIT_STORY_MAP, ASK_LINK_TEXT, SELECT_LINK_TARGET = range(7) # Пример
 
+    # 1. Создаем ConversationHandler для рассылки
+    send_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('startsend', startsend_command)],
+        states={
+            COLLECTING_MEDIA: [
+                # Команды должны идти первыми, чтобы они не считались за медиа
+                CommandHandler('nsend', endsend_command),
+                CommandHandler('cancelsend', cancelsend_command),
+                
+                # Обработчик для сбора любых сообщений (текст, фото, видео и т.д.)
+                MessageHandler(filters.ALL & ~filters.COMMAND, collect_media_handler)
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancelsend', cancelsend_command),
+            CommandHandler('start', start) # Позволяет прервать рассылку командой /start
+        ],
+        # allow_reentry=True # Не обязательно, но может быть полезно
+    )
+
+    # 2. ДОБАВЛЯЕМ НАШ НОВЫЙ ОБРАБОТЧИК В ПРИЛОЖЕНИЕ (ПЕРЕД ОСНОВНЫМ!)
+    application.add_handler(send_conv_handler)
+    application.add_handler(InlineQueryHandler(inlinequery))    
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(button_handler, pattern='^create_story_start$'),
@@ -10387,6 +10584,7 @@ def main() -> None:
         ],
         allow_reentry=True
     )
+    application.add_handler(conv_handler)
 
     # Добавляем обработчики
     application.add_handler(CallbackQueryHandler(handle_inline_play, pattern=r"^inlineplay_"))
