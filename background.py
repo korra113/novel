@@ -7,7 +7,7 @@ import logging
 
 # --- КОНФИГУРАЦИЯ ---
 BUILD_FOLDER = os.path.join(os.path.dirname(__file__), 'client', 'build')
-TELEGRAM_BOT_TOKEN = "7923930676:AAEkCg6-E35fyRnAzvxqoZvgEo8o8KTT8EU"
+TELEGRAM_BOT_TOKEN = "7553491252:AAFwKa2WzZ6wKMVUIGt18oxCGPNqvSo5oRA"
 
 app = Flask(__name__, static_folder=BUILD_FOLDER, static_url_path='')
 logging.getLogger("httpx").setLevel(logging.WARNING) # Уменьшает спам от http запросов
