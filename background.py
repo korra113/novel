@@ -374,6 +374,29 @@ def add_media(user_id_str, story_id, fragment_id):
     save_story_data(user_id_str, story_id, story)
 
     return jsonify({"status": "ok"})
+# 👇 НОВАЯ ФУНКЦИЯ, КОТОРУЮ НУЖНО ДОБАВИТЬ
+@app.route('/api/story/<user_id_str>/<story_id>/fragment/<fragment_id>/choices', methods=['PUT'])
+def update_choices(user_id_str, story_id, fragment_id):
+    from novel import load_all_user_stories, save_story_data
+    data = request.get_json()
+    choices_array = data.get("choices")
+
+    # Проверяем, что массив choices был передан
+    if choices_array is None:
+        return jsonify({"error": "Массив choices обязателен"}), 400
+
+    all_stories = load_all_user_stories(user_id_str)
+    story = all_stories.get(story_id)
+    if not story or "fragments" not in story or fragment_id not in story["fragments"]:
+        return jsonify({"error": "Фрагмент не найден"}), 404
+
+    # Находим нужный фрагмент и полностью заменяем его массив кнопок
+    story["fragments"][fragment_id]["choices"] = choices_array
+    save_story_data(user_id_str, story_id, story)
+
+    return jsonify({"status": "ok", "updatedFragment": story["fragments"][fragment_id]})
+
+    
 @app.route('/api/story/<user_id_str>/<story_id>/fragment/<fragment_id>/media', methods=['PUT'])
 def update_media(user_id_str, story_id, fragment_id):
     from novel import load_all_user_stories, save_story_data
