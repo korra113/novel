@@ -4390,7 +4390,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await sent_wait_message.edit_text("Ошибка при создании схемы.", reply_markup=reply_markup)
 
             else:
-                escaped_title = html.escape(story_data.get('title', story_id))             
+                escaped_title = html.escape(story_data.get('title', story_id))
+
                 await query.edit_message_text(
                     f"Редактирование \"{escaped_title}\".\n"
                     f"id истории: <code>{story_id}</code>.\n"  
@@ -5508,33 +5509,31 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
     return ADD_CONTENT
-    
-async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+
+async def confirm_replace_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
 
-    data = query.data  # delete_story_userid_storyid
-    logger.info(f"data {data}.")    
-    prefix, user_id_str, story_id = data.rsplit('_', 2)
-    logger.info(f"story_id {story_id}.") 
-    logger.info(f"user_id_str {user_id_str}.") 
-    context.user_data['delete_candidate'] = (user_id_str, story_id)
+    if query.data.startswith("confirm_replace:"):
+        fragment_id = query.data.split(":")[1]
+        pending = context.user_data.get("pending_fragment")
+        if pending and pending["fragment_id"] == fragment_id:
+            # Обновляем фрагмент
+            story_data = context.user_data["current_story"]
+            story_data["fragments"][fragment_id] = pending
+            save_current_story_from_context(context)
 
-    story_data = load_user_story(user_id_str, story_id)
-    story_title = story_data.get("title", "Без названия")
+            await show_fragment_actions(update, context, fragment_id)
+            context.user_data.pop("pending_fragment", None)
+            return ADD_CONTENT
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Да", callback_data="confirm_delete"),
-            InlineKeyboardButton("◀️ Нет, вернуться", callback_data="view_stories")
-        ]
-    ])
-    story_title = html.escape(story_title)
-    await query.edit_message_text(
-        f"Вы уверены, что хотите удалить историю <b>«{story_title}»</b>?",
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
+    elif query.data == "cancel_replace":
+        await query.delete_message()
+        context.user_data.pop("pending_fragment", None)
+        return ADD_CONTENT
+    await show_fragment_actions(update, context, fragment_id)
+    return ADD_CONTENT
 
 
 
@@ -8663,6 +8662,7 @@ async def delete_all_neural_stories_firebase(update: Update, context: ContextTyp
         )
     else:
         await update.callback_query.answer("Нейроистории не найдены.", show_alert=True)
+
 
 
 async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYPE):
