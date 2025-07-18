@@ -2982,6 +2982,7 @@ def build_legend_text(story_data: dict, fragment_ids: list[str]) -> str:
         if text:
             trimmed_html = trim_html_preserving_tags(text, 25)
             clean_text = strip_html_tags(trimmed_html)
+            clean_text = html.escape(clean_text)
             line_parts.append(f"«{clean_text}»" + ("…" if len(strip_html_tags(text)) > 30 else ""))
 
 
@@ -4329,7 +4330,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if total_fragments <= 15 and len(legend_text) <= 800:
                 edited = True
                 sent_wait_message = None
-
+                escaped_title = html.escape(story_data.get('title', story_id))
                 try:
                     await query.edit_message_text("Создаю схему истории, подождите...")
                 except telegram.error.BadRequest as e:
@@ -4347,7 +4348,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 sent_message = await query.message.reply_photo(
                                     photo=photo_file,
                                     caption=(
-                                        f"Схема истории \"{story_data.get('title', story_id)}\".\n"
+                                        f"Схема истории \"{escaped_title}\".\n"
                                         f"id истории: <code>{story_id}</code>.\n"  
                                         f"<i>(Вы можете скопировать id истории и использовать его для создания кнопки мгновенного запуска данной истории, подробнее по кнопке помощи ниже или в обучении)</i>\n\n"
                                         f"Выберите фрагмент для редактирования:\n\n"
@@ -4362,7 +4363,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 sent_message = await query.message.reply_document(
                                     document=photo_file,
                                     caption=(
-                                        f"Схема истории \"{story_data.get('title', story_id)}\".\n"
+                                        f"Схема истории \"{escaped_title}\".\n"
                                         f"id истории: <code>{story_id}</code>.\n"  
                                         f"<i>(Вы можете скопировать id истории и использовать его для создания кнопки мгновенного запуска данной истории, подробнее по кнопке помощи ниже или в обучении)</i>\n\n"
                                         f"Выберите фрагмент для редактирования:\n\n"
@@ -4389,8 +4390,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         await sent_wait_message.edit_text("Ошибка при создании схемы.", reply_markup=reply_markup)
 
             else:
+                escaped_title = html.escape(story_data.get('title', story_id))             
                 await query.edit_message_text(
-                    f"Редактирование \"{story_data.get('title', story_id)}\".\n"
+                    f"Редактирование \"{escaped_title}\".\n"
                     f"id истории: <code>{story_id}</code>.\n"  
                     f"<i>(Вы можете скопировать id истории и использовать его для создания кнопки мгновенного запуска данной истории, подробнее по кнопке помощи ниже или в обучении)</i>\n\n"                                                                               
                     f"Выберите фрагмент для редактирования или воспользуйтесь кнопками:\n\n"
@@ -4603,8 +4605,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             # `build_fragment_keyboard` получает ПОЛНЫЙ отсортированный список и текущую страницу
             reply_markup = build_fragment_keyboard(owner_id, story_id, sorted_full_fragment_ids, current_page_for_display, story_data)
 
+            escaped_title = html.escape(story_data.get('title', story_id))
             message_text = (
-                f"Схема истории \"{story_data.get('title', story_id)}\".\n"
+                f"Схема истории \"{escaped_title}\".\n"
                 f"id истории: <code>{story_id}</code>.\n"
                 f"<i>(Вы можете скопировать id истории и отправить его другим людям. Им будет достаточно просто отправить этот id боту и ваша история тут же запустится)</i>\n\n"
                 f"Выберите фрагмент для редактирования (Страница {current_page_for_display}/{total_pages if total_pages > 0 else 1}):\n\n" # Добавлена информация о странице в текст
@@ -5506,30 +5509,33 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     return ADD_CONTENT
     
-
-async def confirm_replace_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data.startswith("confirm_replace:"):
-        fragment_id = query.data.split(":")[1]
-        pending = context.user_data.get("pending_fragment")
-        if pending and pending["fragment_id"] == fragment_id:
-            # Обновляем фрагмент
-            story_data = context.user_data["current_story"]
-            story_data["fragments"][fragment_id] = pending
-            save_current_story_from_context(context)
+    data = query.data  # delete_story_userid_storyid
+    logger.info(f"data {data}.")    
+    prefix, user_id_str, story_id = data.rsplit('_', 2)
+    logger.info(f"story_id {story_id}.") 
+    logger.info(f"user_id_str {user_id_str}.") 
+    context.user_data['delete_candidate'] = (user_id_str, story_id)
 
-            await show_fragment_actions(update, context, fragment_id)
-            context.user_data.pop("pending_fragment", None)
-            return ADD_CONTENT
+    story_data = load_user_story(user_id_str, story_id)
+    story_title = story_data.get("title", "Без названия")
 
-    elif query.data == "cancel_replace":
-        await query.delete_message()
-        context.user_data.pop("pending_fragment", None)
-        return ADD_CONTENT
-    await show_fragment_actions(update, context, fragment_id)
-    return ADD_CONTENT
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Да", callback_data="confirm_delete"),
+            InlineKeyboardButton("◀️ Нет, вернуться", callback_data="view_stories")
+        ]
+    ])
+    story_title = html.escape(story_title)
+    await query.edit_message_text(
+        f"Вы уверены, что хотите удалить историю <b>«{story_title}»</b>?",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+
 
 
 media_group_tasks = {}  # глобальная переменная, чтобы избежать повторной обработки
@@ -7048,12 +7054,14 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
 
                 if image_path:
                     try:
+                        escaped_title = html.escape(story_data.get('title', story_id))
                         with open(image_path, 'rb') as photo_file:
                             try:
+                                
                                 sent_message = await query.message.reply_photo(
                                     photo=photo_file,
                                     caption = (
-                                        f"Схема истории \"{story_data.get('title', story_id)}\".\n"
+                                        f"Схема истории \"{escaped_title}\".\n"
                                         f"id истории: <code>{story_id}</code>.\n"  
                                         f"<i>(Вы можете скопировать id истории и отправить его другим людям. Им будет достаточно просто отправить этот id боту и ваша история тут же запустится)</i>\n\n"                                                                               
                                         f"Выберите фрагмент для редактирования:\n\n"
@@ -7069,7 +7077,7 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
                                 await query.message.reply_document(
                                     document=photo_file,
                                     caption = (
-                                        f"Схема истории \"{story_data.get('title', story_id)}\".\n"
+                                        f"Схема истории \"{escaped_title}\".\n"
                                         f"id истории: <code>{story_id}</code>.\n"  
                                         f"<i>(Вы можете скопировать id истории и отправить его другим людям. Им будет достаточно просто отправить этот id боту и ваша история тут же запустится)</i>\n\n"                                                                               
                                         f"Выберите фрагмент для редактирования:\n\n"
@@ -7090,9 +7098,10 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
                     await query.edit_message_text("Ошибка при создании схемы.", reply_markup=reply_markup)
 
             else:
+                escaped_title = html.escape(story_data.get('title', story_id))
                 # Если больше 20 — просто показать фрагменты и кнопку "посмотреть карту"
                 await query.edit_message_text(
-                    f"Редактирование \"{story_data.get('title', story_id)}\".\n"
+                    f"Редактирование \"{escaped_title}\".\n"
                     f"id истории: <code>{story_id}</code>.\n"  
                     f"<i>(Вы жете скопировать id истории и отправить его другим людям. Им будет достаточно просто отправить этот id боту и ваша история тут же запустится)</i>\n\n"                                                                               
                     f"Выберите фрагмент для редактирования или сгенерируйте карту истории по нажатию кнопки:\n\n"
@@ -10453,7 +10462,7 @@ def main() -> None:
 
     # 2. ДОБАВЛЯЕМ НАШ НОВЫЙ ОБРАБОТЧИК В ПРИЛОЖЕНИЕ (ПЕРЕД ОСНОВНЫМ!)
     application.add_handler(send_conv_handler)
-    application.add_handler(InlineQueryHandler(inlinequery))    
+    application.add_handler(InlineQueryHandler(inlinequery))   
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(button_handler, pattern='^create_story_start$'),
