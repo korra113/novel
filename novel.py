@@ -1850,24 +1850,17 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     results = []
     user_id = str(update.inline_query.from_user.id)
     stories_to_show = {}
-    # Определяем is_id_search в начале, чтобы использовать его позже
-    is_id_search = is_possible_story_id(query_text.lower()) if query_text else False
-
-    def format_story_text(story_id: str, story_data: dict, bot_username: str) -> str:
-        """Форматирует текст сообщения для инлайн-результата."""
+    
+    def format_story_text(story_id: str, story_data: dict) -> str:
         title = story_data.get("title", "Без названия")
         neural = story_data.get("neural", False)
-        author = story_data.get("author")
-        # Создаем URL для ссылки
-        url = f"https://t.me/{bot_username}?start={story_id}"
-
-        lines = [f"📖 <b>История:</b> «{clean_caption(title)}»"]
+        author = story_data.get("author", "")
+        clean_author = html.escape(author)
+        clean_title = html.escape(title)        
+        lines = [f"📖 <b>История:</b> «{clean_caption(clean_title)}»"]
         if author:
-            lines.append(f"✍️ <b>Автор:</b> {clean_caption(author)}{' (нейроистория)' if neural else ''}")
+            lines.append(f"✍️ <b>Автор:</b> {clean_caption(clean_author)}{' (нейроистория)' if neural else ''}")
         lines.append(f"🆔 <b>ID:</b> <code>{story_id}</code>")
-        # --- Добавлена новая строка со ссылкой ---
-        lines.append(f"🔗 <b>Ссылка:</b> {url}")
-        # ---
         lines.append("\n<i>Нажмите кнопку ниже, чтобы настроить и запустить историю в этом чате.</i>")
         return "\n".join(lines)
 
@@ -1877,6 +1870,8 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         stories_to_show = user_stories_ref.get() or {}
     else:
         query_text_lower = query_text.lower()
+        is_id_search = is_possible_story_id(query_text_lower)
+
         if is_id_search:
             # Поиск по всем историям всех пользователей только по ID
             all_users_data = db.reference('users_story').get() or {}
@@ -1893,8 +1888,9 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     stories_to_show[story_id_key] = story_content
 
     for story_id, story_data in stories_to_show.items():
+        # Определяем владельца (нужно только если поиск был по ID)
         owner_user_id_for_story = user_id
-        if is_id_search:
+        if is_possible_story_id(query_text):
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
                 if story_id in user_stories_dict:
@@ -1909,17 +1905,13 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             id=str(uuid4()),
             title=f"История: {story_data.get('title', 'Без названия')}",
             description=f"Автор: {story_data.get('author', 'Неизвестен')}",
-            # --- Передаем context.bot.username в функцию форматирования ---
-            input_message_content=InputTextMessageContent(
-                format_story_text(story_id, story_data, context.bot.username)
-            ),
-            # ---
+            input_message_content=InputTextMessageContent(format_story_text(story_id, story_data), parse_mode="HTML"),
             reply_markup=buttons
         ))
         if len(results) >= 49:
             break
 
-    await update.inline_query.answer(results, cache_time=10)
+    await update.inline_query.answer(results, cache_time=15)
 
 
 
@@ -4856,21 +4848,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         raw_value = str(effect.get("value", "?"))
                         value = html.escape(raw_value)
 
-                        # Определяем тип эффекта
-                        if re.match(r'^[+-]\d+', raw_value):
+                        # Определяем тип эффекта по raw_value
+                        if re.match(r'^[+-]?\(\-?\d+\-+\-?\d+\)$', raw_value):  # например +(5-9), -(3--8)
                             verb = "меняет атрибут"
-                        elif re.match(r'^[<>=]', raw_value):
+                        elif re.match(r'^[+-]\d+$', raw_value):  # например +5, -3
+                            verb = "меняет атрибут"
+                        elif re.match(r'^[<>=]', raw_value):  # сравнение
                             verb = "проверка атрибута"
-                        else:
+                        elif re.match(r'^-?\d+\-+\-?\d+$', raw_value):  # диапазон: 3-5, -2--1, 3--8
                             verb = "задаёт атрибут"
+                        elif re.match(r'^-?\d+$', raw_value):  # просто число: 7, -1
+                            verb = "задаёт атрибут"
+                        else:
+                            verb = "неизвестный эффект"
 
                         effect_lines.append(f"{stat}: {value} ({verb})")
 
                     if effect_lines:
                         effects_text = ", ".join(effect_lines)
                         text_lines.append(
-                            f"\n\n🔸 Выбор <b>«{html.escape(choice.get('text', '...'))}»</b> "
-                            f"ведущий на фрагмент <code>{html.escape(choice.get('target', '???'))}</code> имеет эффект: {effects_text}"
+                            f"\n\n🔸 Выбор <b>«{html.escape(choice['text'])}»</b> ведущий на фрагмент <code>{html.escape(choice['target'])}</code> имеет эффект: {effects_text}"
                         )
 
             effects_info = "".join(text_lines)
@@ -6463,13 +6460,19 @@ async def show_fragment_actions(update: Update, context: ContextTypes.DEFAULT_TY
                 raw_value = str(effect.get("value", "?"))
                 value = html.escape(raw_value)
 
-                # Определяем тип эффекта по value
-                if re.match(r'^[+-]\d+', raw_value):
+                # Определяем тип эффекта по raw_value
+                if re.match(r'^[+-]?\(\-?\d+\-+\-?\d+\)$', raw_value):  # например +(5-9), -(3--8)
                     verb = "меняет атрибут"
-                elif re.match(r'^[<>=]', raw_value):
+                elif re.match(r'^[+-]\d+$', raw_value):  # например +5, -3
+                    verb = "меняет атрибут"
+                elif re.match(r'^[<>=]', raw_value):  # сравнение
                     verb = "проверка атрибута"
-                else:
+                elif re.match(r'^-?\d+\-+\-?\d+$', raw_value):  # диапазон: 3-5, -2--1, 3--8
                     verb = "задаёт атрибут"
+                elif re.match(r'^-?\d+$', raw_value):  # просто число: 7, -1
+                    verb = "задаёт атрибут"
+                else:
+                    verb = "неизвестный эффект"
 
                 effect_lines.append(f"{stat}: {value} ({verb})")
 
@@ -7141,19 +7144,18 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
 
 
 
-
 def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str]]:
     clean_text = button_text
     effects = []
     errors = []
-
+    
     effect_tag_pattern = re.compile(r"\{\{(.*?)\}\}")
 
     for match in effect_tag_pattern.finditer(button_text):
         full_tag = match.group(0)
         content = match.group(1).strip()
-
-        items = [item.strip() for item in content.split(',') if item.strip()]
+        logger.info(f"full_tag {full_tag}.") 
+        items = smart_split(content)
         for item in items:
             if ':' not in item:
                 phrase = item.strip()
@@ -7161,25 +7163,71 @@ def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str
             else:
                 phrase, value_part = map(str.strip, item.split(':', 1))
 
-            # Поддержка значений вроде: +2, =3, 1-5, -2--1, 5-10 (и (hide))
-            value_match = re.fullmatch(
-                r"([+\-<>=]?)\s*(-?\d+(?:\s*-\s*-?\d+)?)(?:\s*\((hide)\))?",
-                value_part, re.IGNORECASE
+            # Проверка на распределение в диапазоне с модификаторами
+            dist_pattern = re.fullmatch(
+                r"([+\-<>=]?)"                              # символ перед скобками или диапазоном (например +, -, <)
+                r"(\(?-?\d+\s*-\s*-?\d+\)?)"               # диапазон, возможно в скобках
+                r"(?:\[(.*?)\])?"                          # опциональные модификаторы
+                r"(?:\s*\((hide)\))?",                     # опциональный hide
+                value_part,
+                re.IGNORECASE
             )
 
-            if not value_match:
-                errors.append(f"Ошибка в теге {full_tag}: неверный формат значения '{value_part}'. Пример: +2, -1 (hide), 5-10 и т.п.")
+            if dist_pattern:
+                symbol = dist_pattern.group(1)
+                raw_range = dist_pattern.group(2).replace(' ', '')
+                number_range = f"{symbol}{raw_range}" if symbol else raw_range
+                modifiers_str = dist_pattern.group(3)
+                hide = dist_pattern.group(4) is not None
+
+                modifiers = []
+                if modifiers_str:
+                    for mod in modifiers_str.split(','):
+                        mod = mod.strip()
+                        if ':' not in mod:
+                            errors.append(f"Ошибка в модификаторе '{mod}' внутри {full_tag}: отсутствует ':'")
+                            continue
+                        left, right = map(str.strip, mod.split(':', 1))
+
+                        if not re.fullmatch(r"-?\d+", left):
+                            errors.append(f"Ошибка в модификаторе '{mod}' внутри {full_tag}: некорректное значение '{left}' до ':' (должно быть целое число)")
+                            continue
+
+                        if not re.fullmatch(r"[+-]?\d+%", right):
+                            errors.append(f"Ошибка в модификаторе '{mod}' внутри {full_tag}: некорректный процент '{right}' после ':' (ожидается например '+20%')")
+                            continue
+
+                        value = int(left)
+                        prob = int(right.replace('%', ''))
+                        modifiers.append({"value": value, "prob": prob})
+
+                effects.append({
+                    "stat": phrase.lower(),
+                    "value": number_range,
+                    "modifiers": modifiers,
+                    "hide": hide
+                })
                 continue
 
-            symbol = value_match.group(1)
-            number = value_match.group(2).replace(' ', '')  # удаляем пробелы из диапазона
-            hide = value_match.group(3) is not None
+            # Стандартный формат: +2, -1 (hide), 5-10 и т.п.
+            value_match = re.fullmatch(
+                r"([+\-<>=]?)\s*(-?\d+(?:\s*-\s*-?\d+)?)(?:\s*\((hide)\))?",
+                value_part,
+                re.IGNORECASE
+            )
 
-            effects.append({
-                "stat": phrase.lower(),
-                "value": f"{symbol}{number}",
-                "hide": hide
-            })
+            if value_match:
+                symbol = value_match.group(1)
+                number = value_match.group(2).replace(' ', '')
+                hide = value_match.group(3) is not None
+
+                effects.append({
+                    "stat": phrase.lower(),
+                    "value": f"{symbol}{number}",
+                    "hide": hide
+                })
+            else:
+                errors.append(f"Ошибка в теге {full_tag}: неверный формат значения '{value_part}'.")
 
         clean_text = clean_text.replace(full_tag, '').strip()
 
@@ -7190,44 +7238,69 @@ def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str
 
 
 
-def describe_effects_from_button_text(button_text: str) -> list[str]:
+def describe_effects_from_button_text(button_text: str) -> List[str]:
+    logger.info(f"button_text {button_text}.")        
     effects = []
-    # Находим все блоки {{...}}
     block_pattern = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
 
     for block_match in re.finditer(block_pattern, button_text):
         content = block_match.group(1)
 
-        # Разбиваем по запятой, если в блоке несколько параметров
-        parts = [p.strip() for p in content.split(',') if p.strip()]
+        effect_pattern = re.compile(
+            r"(?P<stat>\w+)\s*:\s*"
+            r"(?P<value>[+\-<>=]?\(?-?\d+\s*-\s*-?\d+\)?|[+\-<>=]?\s*\d+)"  # диапазон или число
+            r"(?:\s*\[(?P<probs>[^\]]+)\])?"
+            r"(?:\s*\((?P<hide>hide)\))?",
+            re.IGNORECASE
+        )
 
-        for part in parts:
-            # Проверяем, есть ли скрытый эффект
-            hide = False
-            if '(hide)' in part.lower():
-                part = re.sub(r'\(hide\)', '', part, flags=re.IGNORECASE).strip()
-                hide = True
+        for match in re.finditer(effect_pattern, content):
+            stat = match.group('stat')
+            value_str = match.group('value').replace(" ", "")
+            prob_dist_str = match.group('probs')
+            hide = bool(match.group('hide'))
 
-            # Разбираем параметр и значение
-            stat_match = re.match(r"(.*?):\s*([+\-<>=]?\d+)", part)
-            if not stat_match:
-                continue
+            logger.info(f"stat {stat}, value_str {value_str}, prob_dist_str {prob_dist_str}, hide {hide}")
+            desc = ""
 
-            stat = stat_match.group(1).strip()
-            value = stat_match.group(2).strip()
+            # Проверка на диапазон — с или без скобок, но обязательно с тире внутри
+            range_match = re.fullmatch(r"([+\-<>=]?)(\(?-?\d+-\-?\d+\)?)", value_str)
+            if range_match:
+                symbol, raw_range = range_match.groups()
 
-            if re.match(r"^[+\-]\d+$", value):
-                desc = f"Значение ({stat.lower()}) изменится на {value}"
-            elif re.match(r"^[<>=]\d+$", value):
-                desc = f"Проверка ({stat}) на значение {value}"
-            elif re.match(r"^\d+$", value):
-                desc = f"Значение ({stat.lower()}) задано на {value}"
+                if raw_range.startswith("(") and raw_range.endswith(")") and symbol in ('+', '-'):
+                    desc = f"Значение ({stat.lower()}) изменится на диапазон {symbol}{raw_range}"
+                else:
+                    desc = f"Значение ({stat.lower()}) задано на диапазон {symbol}{raw_range}"
+
+                # распределение вероятностей
+                if prob_dist_str:
+                    prob_pairs = []
+                    for p_pair in re.split(r'\s*,\s*', prob_dist_str):
+                        prob_match = re.fullmatch(r"(-?\d+)\s*:\s*([+-]?\d+%?)", p_pair)
+                        if prob_match:
+                            val, prob = prob_match.groups()
+                            if not prob.endswith('%'):
+                                prob += '%'
+                            prob_pairs.append(f"{val}:{prob}")
+                    if prob_pairs:
+                        desc += f" с распределением вероятностей [{', '.join(prob_pairs)}]"
+
+            elif re.fullmatch(r"[+\-]\d+", value_str):
+                desc = f"Значение ({stat.lower()}) изменится на {value_str}"
+
+            elif re.fullmatch(r"[<>=]\d+", value_str):
+                desc = f"Проверка ({stat.lower()}) на значение {value_str}"
+
+            elif re.fullmatch(r"\d+", value_str):
+                desc = f"Значение ({stat.lower()}) задано на {value_str}"
+
             else:
                 continue
 
             if hide:
                 desc += ". Не отображается пользователю"
-            
+
             effects.append(desc)
 
     return effects
@@ -7445,6 +7518,7 @@ async def ask_branch_text_handler(update: Update, context: ContextTypes.DEFAULT_
         escaped_text = html.escape(text)
         text_lines.append(f"📝 Текст:\n✦ ━━━━━━━━━━\n{escaped_text}\n✦ ━━━━━━━━━━")
 
+    # Добавим информацию об эффектах, если они есть
     for choice in current_choices:
         if "effects" in choice:
             effect_lines = []
@@ -7455,13 +7529,19 @@ async def ask_branch_text_handler(update: Update, context: ContextTypes.DEFAULT_
                 raw_value = str(effect.get("value", "?"))
                 value = html.escape(raw_value)
 
-                # Определяем тип эффекта по value
-                if re.match(r'^[+-]\d+', raw_value):
+                # Определяем тип эффекта по raw_value
+                if re.match(r'^[+-]?\(\-?\d+\-+\-?\d+\)$', raw_value):  # например +(5-9), -(3--8)
                     verb = "меняет атрибут"
-                elif re.match(r'^[<>=]', raw_value):
+                elif re.match(r'^[+-]\d+$', raw_value):  # например +5, -3
+                    verb = "меняет атрибут"
+                elif re.match(r'^[<>=]', raw_value):  # сравнение
                     verb = "проверка атрибута"
-                else:
+                elif re.match(r'^-?\d+\-+\-?\d+$', raw_value):  # диапазон: 3-5, -2--1, 3--8
                     verb = "задаёт атрибут"
+                elif re.match(r'^-?\d+$', raw_value):  # просто число: 7, -1
+                    verb = "задаёт атрибут"
+                else:
+                    verb = "неизвестный эффект"
 
                 effect_lines.append(f"{stat}: {value} ({verb})")
 
@@ -7470,6 +7550,7 @@ async def ask_branch_text_handler(update: Update, context: ContextTypes.DEFAULT_
                 text_lines.append(
                     f"\n\n🔸 Выбор <b>«{html.escape(choice['text'])}»</b> ведущий на фрагмент <code>{html.escape(choice['target'])}</code> имеет эффект: {effects_text}"
                 )
+
 
     # Финальное сообщение
     text_lines.append(
