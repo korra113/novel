@@ -1031,8 +1031,7 @@ async def process_choice_effects_to_user_attributes(
     context: Optional[CallbackContext] = None
 ) -> Tuple[bool, str, bool, Dict[str, Any]]:
     """
-    Обрабатывает эффекты в порядке их следования, применяя модификации и проверки последовательно.
-    Возвращает: (proceed, alert_text, needs_retry, story_state)
+    Обрабатывает эффекты: set/modify, в том числе с диапазонами и модификаторами.
     """
     story_state = load_story_state_from_firebase(inline_message_id)
     user_attr = story_state.get("user_attributes", {})
@@ -1045,19 +1044,28 @@ async def process_choice_effects_to_user_attributes(
         stat_name = effect.get("stat")
         value_str = effect.get("value", "")
         hide_effect = effect.get("hide", False)
+        modifiers = effect.get("modifiers")
 
-        action_type, op_char, numeric_val = _parse_effect_value(value_str)
+        action_type, op_char, parsed_value = _parse_effect_value(value_str)
 
-        if action_type == "invalid" or not stat_name or numeric_val is None:
-            logger.warning(f"Пропуск некорректного эффекта: {effect}")
+        if action_type == "invalid" or not stat_name or parsed_value is None:
+            logger.warning(f"Пропущен некорректный эффект: {effect}")
             continue
 
-        current_value = temp_user_attr.get(stat_name)
-        val_for_calc = 0
+        # Генерируем числовое значение, если диапазон
+        if action_type in ("set_range", "modify_range"):
+            min_val, max_val = parsed_value
+            numeric_val = _get_random_value_from_range(min_val, max_val, modifiers)
+            action_type = "set" if action_type == "set_range" else "modify"
+        else:
+            numeric_val = parsed_value
+
+        current_value = temp_user_attr.get(stat_name, 0)
         try:
             val_for_calc = int(current_value)
         except (ValueError, TypeError):
-            logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_value}'. Используется 0.")
+            logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_value}', принимаем 0.")
+            val_for_calc = 0
 
         if action_type == "check":
             check_passed = (
@@ -1070,12 +1078,12 @@ async def process_choice_effects_to_user_attributes(
                 if len(reason) > 200:
                     reason = reason[:197] + "..."
                 failure_reasons.append(reason)
-                break  # прерываем цепочку — дальнейшие эффекты не выполняются
+                break  # Цепочка прерывается
 
         elif action_type == "set":
             temp_user_attr[stat_name] = numeric_val
             if not hide_effect:
-                success_alert_parts.append(f"▫️Вы получили атрибут {stat_name}: {numeric_val}")
+                success_alert_parts.append(f"▫️Атрибут {stat_name} установлен на {numeric_val}")
 
         elif action_type == "modify":
             new_val = val_for_calc + numeric_val if op_char == '+' else val_for_calc - numeric_val
@@ -1084,7 +1092,7 @@ async def process_choice_effects_to_user_attributes(
                 word = "увеличен" if op_char == '+' else "уменьшен"
                 success_alert_parts.append(f"▫️Атрибут {stat_name} {word} на {abs(numeric_val)}")
 
-    # Результат обработки
+    # Формируем результат
     final_alert_text = "\n".join(success_alert_parts)
 
     if failure_reasons:
@@ -1092,7 +1100,7 @@ async def process_choice_effects_to_user_attributes(
         full_alert = f"{final_alert_text}\n\n⚠️ {failure_alert}" if final_alert_text else f"⚠️ {failure_alert}"
         return False, full_alert.strip(), True, story_state
 
-    # Проверки пройдены, сохраняем изменения
+    # Сохраняем изменения
     story_state["user_attributes"] = temp_user_attr
     save_story_state_to_firebase(inline_message_id, story_state)
     if context and inline_message_id:
