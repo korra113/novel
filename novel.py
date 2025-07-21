@@ -8830,10 +8830,97 @@ def clear_user_story_complete_progress(story_id: str, user_id: int) -> None:
 
 # --- Новые вспомогательные функции для обработки эффектов ---
 
-def _parse_effect_value(value_str: str) -> Tuple[str, Optional[str], Optional[int]]:
-    """Разбирает строку значения эффекта на (тип_действия, символ_операции, числовое_значение)."""
-    value_str = str(value_str).strip() # Убедимся, что это строка и уберем пробелы
+# --- Новые вспомогательные функции для обработки эффектов ---
 
+
+
+def _get_random_value_from_range(
+    min_val: int, 
+    max_val: int, 
+    modifiers: Optional[List[Dict[str, Any]]]
+) -> int:
+    """
+    Выбирает случайное число из диапазона с учетом модификаторов вероятности.
+    """
+    if min_val > max_val:
+        min_val, max_val = max_val, min_val # Гарантируем правильный порядок
+
+    all_numbers = list(range(min_val, max_val + 1))
+    
+    # Если нет модификаторов, используем чистый рандом
+    if not modifiers:
+        return random.choice(all_numbers)
+
+    # Базовый вес для каждого числа в диапазоне
+    weights = [1.0] * len(all_numbers)
+
+    for mod in modifiers:
+        val = mod.get("value")
+        prob = mod.get("prob")
+
+        # Проверяем, что модификатор корректен и его значение входит в диапазон
+        if val is None or prob is None or not (min_val <= val <= max_val):
+            continue
+        
+        # Находим индекс числа, чтобы изменить его вес
+        # val - min_val дает нам точный индекс в списке all_numbers/weights
+        try:
+            index = all_numbers.index(val)
+            # Рассчитываем новый вес на основе процента 'prob'
+            # +30% -> 1.3, -20% -> 0.8
+            weight_multiplier = 1.0 + (prob / 100.0)
+            weights[index] *= weight_multiplier
+            # Убедимся, что вес не стал отрицательным
+            if weights[index] < 0:
+                weights[index] = 0
+        except (ValueError, IndexError):
+            # Этого не должно случиться благодаря проверке `min_val <= val <= max_val`
+            continue
+
+    # random.choices возвращает список, поэтому берем первый элемент
+    # Если все веса оказались равны 0, random.choices вызовет ошибку,
+    # в таком случае возвращаем просто случайное значение.
+    if sum(weights) == 0:
+        return random.choice(all_numbers)
+        
+    return random.choices(all_numbers, weights=weights, k=1)[0]
+
+
+
+from typing import List, Dict, Any, Tuple, Optional, Union
+
+
+
+def _parse_effect_value(value_str: str) -> Tuple[str, Optional[str], Optional[Union[int, Tuple[int, int]]]]:
+    """
+    Разбирает строку значения эффекта. 
+    Теперь возвращает (тип_действия, символ_операции, число_или_диапазон).
+    Для диапазонов возвращается кортеж (min, max).
+    """
+    value_str = str(value_str).strip()
+
+    # Новый парсинг для диапазонов
+    # 1. modify с диапазоном: +(7-20) или -(-3-15)
+    modify_range_match = re.match(r"^([+\-])\s*\((-?\d+)-(-?\d+)\)$", value_str)
+    if modify_range_match:
+        op, min_val_str, max_val_str = modify_range_match.groups()
+        try:
+            return "modify_range", op, (int(min_val_str), int(max_val_str))
+        except ValueError:
+            logger.warning(f"Не удалось разобрать диапазон в modify: {value_str}")
+            return "invalid", None, None
+
+    # 2. set с диапазоном: 3-10 или -7--12
+    set_range_match = re.match(r"^(-?\d+)-(-?\d+)$", value_str)
+    if set_range_match:
+        min_val_str, max_val_str = set_range_match.groups()
+        try:
+            return "set_range", None, (int(min_val_str), int(max_val_str))
+        except ValueError:
+            logger.warning(f"Не удалось разобрать диапазон в set: {value_str}")
+            return "invalid", None, None
+
+    # Старая логика для конкретных чисел
     if value_str.startswith(('+', '-')):
         op = value_str[0]
         try:
@@ -8862,7 +8949,7 @@ async def process_choice_effects_on_click(
     story_id: str,
     user_id: int,
     effects_list: List[Dict[str, Any]],
-    query: Update.callback_query # query передается для немедленного ответа на проверки
+    query: 'Update.callback_query' # Используем строку, чтобы избежать прямого импорта
 ) -> Tuple[bool, str, bool]:
     """
     Обрабатывает эффекты при нажатии кнопки выбора.
@@ -8870,86 +8957,102 @@ async def process_choice_effects_on_click(
     """
     user_progress = load_user_story_progress(story_id, user_id)
     current_effects_data = user_progress.get("current_effects", {})
-    # temp_effects_data используется для последовательного применения эффектов внутри одного списка
-    temp_effects_data = dict(current_effects_data) 
+    temp_effects_data = dict(current_effects_data)
 
-    success_alert_parts = [] # Части для сообщения об успешном применении эффектов
+    success_alert_parts = []
 
     for effect in effects_list:
         stat_name = effect.get("stat")
-        value_str = effect.get("value", "") # Получаем как есть, _parse_effect_value обработает
+        value_str = effect.get("value", "")
         hide_effect = effect.get("hide", False)
-        logger.info(f"action_type: {value_str}")
-        action_type, op_char, numeric_val = _parse_effect_value(value_str)
-        logger.info(f"action_type: {action_type}")
-        if action_type == "invalid" or not stat_name or numeric_val is None: # Добавлена проверка numeric_val
+        
+        # Шаг 1: Парсим значение, которое может быть числом или диапазоном
+        parsed_action_type, op_char, parsed_value = _parse_effect_value(value_str)
+        
+        if parsed_action_type == "invalid" or not stat_name or parsed_value is None:
             logger.warning(f"Пропуск неверного или неполного эффекта: {effect}")
             continue
 
-        # Получаем текущее значение стата, учитывая изменения от предыдущих эффектов в ЭТОМ ЖЕ списке
+        # Шаг 2: Определяем конечное числовое значение и тип действия
+        final_numeric_val = None
+        final_action_type = None
+
+        if parsed_action_type in ("set_range", "modify_range"):
+            min_val, max_val = parsed_value
+            modifiers = effect.get("modifiers")
+            final_numeric_val = _get_random_value_from_range(min_val, max_val, modifiers)
+            # Преобразуем тип действия в базовый для дальнейшей обработки
+            final_action_type = "set" if parsed_action_type == "set_range" else "modify"
+        else:
+            final_numeric_val = parsed_value
+            final_action_type = parsed_action_type
+
+        # Получаем текущее значение стата, учитывая изменения от предыдущих эффектов
         current_stat_val_for_effect = temp_effects_data.get(stat_name)
 
-        if action_type == "check":
-            val_for_check = 0 # Значение по умолчанию для проверки, если стат не существует
+        # Шаг 3: Используем существующую логику с финальными значениями
+        if final_action_type == "check":
+            val_for_check = 0
             if current_stat_val_for_effect is not None:
                 try:
                     val_for_check = int(current_stat_val_for_effect)
-                except (ValueError, TypeError): # Если значение стата не числовое
+                except (ValueError, TypeError):
                     logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_stat_val_for_effect}'. Используется 0 для проверки.")
                     val_for_check = 0
             
             check_passed = False
-            if op_char == '>' and val_for_check > numeric_val: check_passed = True
-            elif op_char == '<' and val_for_check < numeric_val: check_passed = True
-            elif op_char == '=' and val_for_check == numeric_val: check_passed = True
+            if op_char == '>' and val_for_check > final_numeric_val: check_passed = True
+            elif op_char == '<' and val_for_check < final_numeric_val: check_passed = True
+            elif op_char == '=' and val_for_check == final_numeric_val: check_passed = True
 
             if not check_passed:
                 if hide_effect:
-                    # Эта кнопка не должна была быть видимой или произошла ошибка. Без уведомления.
-                    return False, "", True # Не продолжать, сигнал, что кнопка должна быть скрыта
+                    return False, "", True
                 else:
-                    reason = f"Требование: {stat_name} {op_char}{numeric_val} (тек: {val_for_check})"
+                    reason = f"Требование: {stat_name} {op_char}{final_numeric_val} (тек: {val_for_check})"
                     if len(reason) > MAX_ALERT_LENGTH: reason = reason[:MAX_ALERT_LENGTH-3]+"..."
                     await query.answer(text=reason, show_alert=True)
-                    return False, "", False # Не продолжать, без текста успеха, кнопка не "скрываемая ошибка"
+                    return False, "", False
         
-        elif action_type == "set":
-            temp_effects_data[stat_name] = numeric_val
+        elif final_action_type == "set":
+            temp_effects_data[stat_name] = final_numeric_val
             user_progress["current_effects"] = temp_effects_data
-            save_user_story_progress(story_id, user_id, user_progress)  # 💾 Сохраняем сразу            
+            save_user_story_progress(story_id, user_id, user_progress)            
             if not hide_effect:
-                success_alert_parts.append(f"▫️Вы получили атрибут {stat_name}:{numeric_val}")
+                success_alert_parts.append(f"▫️Ваш атрибут {stat_name} установлен на: {final_numeric_val}")
         
-        elif action_type == "modify":
-            base_for_modification = 0 # Значение по умолчанию 1, если стат совершенно новый
-            if current_stat_val_for_effect is not None: # Стат существует (может быть 0 или другое значение)
+        elif final_action_type == "modify":
+            base_for_modification = 0
+            if current_stat_val_for_effect is not None:
                 try:
                     base_for_modification = int(current_stat_val_for_effect)
-                except (ValueError, TypeError): # Если значение стата не числовое
-                    logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_stat_val_for_effect}'. Используется 1 как база для модификации.")
-                    base_for_modification = 1 # Возврат к значению по умолчанию
+                except (ValueError, TypeError):
+                    logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_stat_val_for_effect}'. Используется 0 как база для модификации.")
+                    base_for_modification = 0
             
-            new_val = (base_for_modification + numeric_val) if op_char == '+' else (base_for_modification - numeric_val)
-            temp_effects_data[stat_name] = new_val
+            new_val = (base_for_modification + final_numeric_val) if op_char == '+' else (base_for_modification - final_numeric_val)
             user_progress["current_effects"] = temp_effects_data
-            save_user_story_progress(story_id, user_id, user_progress)  # 💾 Сохраняем сразу           
+            save_user_story_progress(story_id, user_id, user_progress)          
             temp_effects_data[stat_name] = new_val
+            
             if not hide_effect:
                 action_word = "увеличен" if op_char == '+' else "уменьшен"
-                # abs(numeric_val) для корректного отображения "на X"
-                success_alert_parts.append(f"▫️Ваш атрибут {stat_name} {action_word} на {abs(numeric_val)}")
+                success_alert_parts.append(f"▫️Ваш атрибут {stat_name} {action_word} на {abs(final_numeric_val)}")
 
-    # Если все проверки пройдены или не было неуспешных проверок
-    user_progress["current_effects"] = temp_effects_data # Сохраняем накопленные изменения
-    save_user_story_progress(story_id, user_id, user_progress) # Сохраняем в Firebase
+    # Сохраняем все накопленные изменения в конце
+    user_progress["current_effects"] = temp_effects_data
+    save_user_story_progress(story_id, user_id, user_progress)
 
     alert_text = ""
-    if success_alert_parts: # Собираем итоговое сообщение
+    if success_alert_parts:
         alert_text = "\n".join(success_alert_parts)
         if len(alert_text) > MAX_ALERT_LENGTH:
             alert_text = alert_text[:MAX_ALERT_LENGTH-3] + "..."
     
-    return True, alert_text, False # Продолжить, текст уведомления (если есть), не скрываемая ошибка
+    return True, alert_text, False
+
+
+
 
 def evaluate_choice_for_display(
     story_id: str,
