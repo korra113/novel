@@ -72,6 +72,36 @@ def delete_fragment(user_id_str, story_id, fragment_id):
     save_story_data(user_id_str, story_id, story)
     return jsonify({"status": "ok"})
 
+@app.route('/api/story/<user_id_str>/<story_id>/fragments/delete', methods=['POST'])
+def delete_multiple_fragments(user_id_str, story_id):
+    from novel import load_all_user_stories, save_story_data
+    data = request.get_json()
+    fragment_ids = data.get("fragment_ids", [])
+
+    if not isinstance(fragment_ids, list):
+        return jsonify({"error": "Неверный формат fragment_ids"}), 400
+
+    all_stories = load_all_user_stories(user_id_str)
+    story = all_stories.get(story_id)
+
+    if not story or "fragments" not in story:
+        return jsonify({"error": "История не найдена"}), 404
+
+    for fragment_id in fragment_ids:
+        if fragment_id in story["fragments"]:
+            del story["fragments"][fragment_id]
+
+    # Удалим все ссылки на эти фрагменты из choice-ов
+    for frag_id in story["fragments"]:
+        if "choices" in story["fragments"][frag_id]:
+            story["fragments"][frag_id]["choices"] = [
+                choice for choice in story["fragments"][frag_id]["choices"]
+                if choice.get("target") not in fragment_ids
+            ]
+
+    save_story_data(user_id_str, story_id, story)
+    return jsonify({"status": "ok", "deleted": fragment_ids})
+
 @app.route('/api/story/<user_id_str>/<story_id>/fragment/<old_name>/rename', methods=['POST'])
 def rename_fragment(user_id_str, story_id, old_name):
     from novel import load_all_user_stories, save_story_data
@@ -415,6 +445,93 @@ def update_media(user_id_str, story_id, fragment_id):
     save_story_data(user_id_str, story_id, story)
 
     return jsonify({"status": "ok"})
+
+# --- НОВЫЙ ЭНДПОИНТ: Создание пустого фрагмента ---
+@app.route('/api/story/<user_id_str>/<story_id>/create_fragment', methods=['POST'])
+def create_standalone_fragment(user_id_str, story_id):
+    # В вашем реальном приложении вы, вероятно, захотите импортировать novel здесь
+    from novel import load_all_user_stories, save_story_data
+    data = request.get_json()
+    new_name = data.get("newName")
+
+    if not new_name:
+        return jsonify({"error": "Имя нового фрагмента не предоставлено"}), 400
+
+    all_stories = load_all_user_stories(user_id_str)
+    story = all_stories.get(story_id)
+    if not story:
+        return jsonify({"error": "История не найдена"}), 404
+        
+    if new_name in story["fragments"]:
+        return jsonify({"error": f"Фрагмент с именем '{new_name}' уже существует"}), 409
+
+    # Создаем новый пустой фрагмент
+    story["fragments"][new_name] = {
+        "text": "(пусто)",
+        "choices": [],
+        "media": []
+    }
+    
+    save_story_data(user_id_str, story_id, story)
+    # Возвращаем обновленную историю, чтобы клиент мог получить данные нового фрагмента
+    return jsonify({"status": "ok", "story": story})
+
+# --- ЭНДПОИНТ: Сохранение заметки (ОБНОВЛЕНО) ---
+@app.route('/api/story/<user_id_str>/<story_id>/bookmarks', methods=['POST'])
+def add_note_bookmark(user_id_str, story_id):
+    from novel import save_story_bookmark # Импортируем новую функцию
+    data = request.get_json()
+    note_text = data.get("text")
+    position = data.get("position")
+
+    if not note_text or position is None:
+        return jsonify({"error": "Недостаточно данных для создания заметки"}), 400
+
+    bookmark_data = {"text": note_text, "position": position}
+    
+    new_bookmark = save_story_bookmark(user_id_str, story_id, bookmark_data)
+    
+    if new_bookmark:
+        return jsonify({"status": "ok", "bookmark": new_bookmark})
+    else:
+        return jsonify({"error": "Не удалось сохранить заметку"}), 500
+
+# --- НОВЫЙ ЭНДПОИНТ: Загрузка всех заметок ---
+@app.route('/api/story/<user_id_str>/<story_id>/bookmarks', methods=['GET'])
+def get_story_bookmarks(user_id_str, story_id):
+    from novel import load_story_bookmarks
+    bookmarks = load_story_bookmarks(user_id_str, story_id)
+    if bookmarks is not None:
+        return jsonify(bookmarks)
+    return jsonify({}) # Возвращаем пустой объект, если заметок нет или произошла ошибка
+
+
+# --- НОВЫЙ ЭНДПОИНТ: Обновление заметки ---
+@app.route('/api/story/<user_id_str>/<story_id>/bookmarks/<note_id>', methods=['PUT'])
+def update_note_bookmark(user_id_str, story_id, note_id):
+    from novel import update_story_bookmark # Импортируем новую функцию
+    data = request.get_json()
+    new_text = data.get("text")
+
+    if new_text is None:
+        return jsonify({"error": "Отсутствует текст для обновления"}), 400
+
+    if update_story_bookmark(user_id_str, story_id, note_id, new_text):
+        return jsonify({"status": "ok"})
+    else:
+        return jsonify({"error": "Не удалось обновить заметку"}), 500
+
+# --- НОВЫЙ ЭНДПОИНТ: Удаление заметки ---
+@app.route('/api/story/<user_id_str>/<story_id>/bookmarks/<note_id>', methods=['DELETE'])
+def delete_note_bookmark(user_id_str, story_id, note_id):
+    from novel import delete_story_bookmark # Импортируем новую функцию
+
+    if delete_story_bookmark(user_id_str, story_id, note_id):
+        return jsonify({"status": "ok"})
+    else:
+        return jsonify({"error": "Не удалось удалить заметку"}), 500
+
+
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
