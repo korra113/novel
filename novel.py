@@ -720,7 +720,64 @@ def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
         logger.warning("Попытка сохранить текущую историю из контекста, но не все данные найдены в context.user_data (user_id_str, story_id, current_story).")
 
 
+def save_story_bookmark(user_id_str: str, story_id: str, bookmark_data: dict):
+    """
+    Сохраняет одну заметку для истории.
+    Использует push() для генерации уникального ID.
+    bookmark_data должен содержать 'text' и 'position'.
+    """
+    try:
+        # Генерируем новый ключ для заметки
+        ref = db.reference(f'users_story/{user_id_str}/{story_id}/bookmarks').push()
+        # Сохраняем данные заметки
+        ref.set(bookmark_data)
+        logger.info(f"Заметка для истории {story_id} сохранена с ID: {ref.key}")
+        # Возвращаем ID и данные для отправки клиенту
+        return { "id": ref.key, **bookmark_data }
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении заметки для истории {story_id}: {e}")
+        return None
 
+def load_story_bookmarks(user_id_str: str, story_id: str):
+    """
+    Загружает все заметки для указанной истории.
+    """
+    try:
+        ref = db.reference(f'users_story/{user_id_str}/{story_id}/bookmarks')
+        bookmarks = ref.get()
+        return bookmarks if bookmarks else {}
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке заметок для истории {story_id}: {e}")
+        return None
+
+
+def update_story_bookmark(user_id_str: str, story_id: str, note_id: str, new_text: str):
+    """
+    Обновляет текст существующей заметки.
+    """
+    try:
+        # Указываем путь прямо к текстовому полю заметки
+        ref = db.reference(f'users_story/{user_id_str}/{story_id}/bookmarks/{note_id}/text')
+        ref.set(new_text)
+        logger.info(f"Текст заметки {note_id} для истории {story_id} обновлен.")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении заметки {note_id} для истории {story_id}: {e}")
+        return False
+
+def delete_story_bookmark(user_id_str: str, story_id: str, note_id: str):
+    """
+    Удаляет заметку по ее ID.
+    """
+    try:
+        # Указываем путь к корню удаляемой заметки
+        ref = db.reference(f'users_story/{user_id_str}/{story_id}/bookmarks/{note_id}')
+        ref.delete()
+        logger.info(f"Заметка {note_id} для истории {story_id} удалена.")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при удалении заметки {note_id} для истории {story_id}: {e}")
+        return False
 
 
 def get_owner_id_or_raise(user_id: int, story_id: str, story_data: dict) -> str:
