@@ -21,7 +21,7 @@ def validate_fragment_name(name):
     if len(name) > 17:
         return False, "Название не должно быть длиннее 17 символов."
     if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
-        return False, "Название может содержать только латиницу, кириллицу, цифры и нижнее подчеркивание."
+        return False, "Название может содержать только латиницу, кириллицу, цифры и нижнее подчеркивание. Максимум 15 символов. Например ИдтиВперёд_3"
     if name.count('_') > 1 or (name.count('_') == 1 and not re.search(r'_[0-9]+$', name)):
         return False, "Допускается только одно нижнее подчеркивание перед цифрой в конце (например, GoLeft_6)."
     return True, ""
@@ -456,7 +456,9 @@ def create_standalone_fragment(user_id_str, story_id):
 
     if not new_name:
         return jsonify({"error": "Имя нового фрагмента не предоставлено"}), 400
-
+    is_valid, error_message = validate_fragment_name(new_name)
+    if not is_valid:
+        return jsonify({"error": error_message}), 400
     all_stories = load_all_user_stories(user_id_str)
     story = all_stories.get(story_id)
     if not story:
