@@ -1882,10 +1882,14 @@ async def handle_poll_vote(update: Update, context: CallbackContext):
         num_votes_for_current_choice = len(poll_data["votes"][choice_idx])
 
         if num_votes_for_current_choice >= required_votes_to_win:
-            await query.answer(f"Голос принят! Вариант набрал {required_votes_to_win} голосов!", show_alert=False)
+            if required_votes_to_win > 1:
+                await query.answer(f"Голос принят! Вариант набрал {required_votes_to_win} голосов!", show_alert=False)
+            else:
+                await query.answer()  # Просто "поглощает" клик без всплывающего сообщения
             logger.info(f"Голосование завершено: {query.inline_message_id}, выбор {choice_idx}")
             await end_poll_and_proceed(context, query.inline_message_id, choice_idx, poll_data)
             return
+
 
         await query.answer("Ваш голос принят!")
         await display_fragment_for_interaction(
