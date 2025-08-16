@@ -5406,7 +5406,7 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
             context.user_data['next_choice_index'] = 1
 
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")]
+                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")],
                 [InlineKeyboardButton("▶️ Открыть в ЛС с ботом", url=f"https://t.me/{context.bot.username}?start={story_id}")]
             ])
 
@@ -5489,7 +5489,7 @@ async def neural_full_story(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             context.user_data['next_choice_index'] = 1
 
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")]
+                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")],
                 [InlineKeyboardButton("▶️ Открыть в ЛС с ботом", url=f"https://t.me/{context.bot.username}?start={story_id}")]
             ])
 
@@ -10900,4 +10900,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
