@@ -5546,8 +5546,14 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data['current_story'] = {
         "title": title,
         "author": username,  # <--- Сохраняем имя автора
-        "owner_id": user_id_str,  # <--- Сохраняем имя автора        
-        "fragments": {}
+        "owner_id": user_id_str,  # <--- Сохраняем владельца
+        "fragments": {
+            "main_1": {
+                "text": "(пусто)",
+                "media": [],
+                "choices": []
+            }
+        }
     }
     context.user_data['current_fragment_id'] = "main_1"
     context.user_data['next_choice_index'] = 1
@@ -10907,6 +10913,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
