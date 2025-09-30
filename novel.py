@@ -78,7 +78,7 @@ from google.genai.types import (
 )
 
 
-GOOGLE_API_KEY = "AIzaSyCJ9lom_jgT-SUHGG-UYrrcpuWn7s8081g"
+GOOGLE_API_KEY = "AIzaSyA56x-9b-w3p-MNIi2eq5Q9rq53tz9o0bE"
 
 client = genai.Client(api_key=GOOGLE_API_KEY)
 # Настройка логирования для отладки
@@ -10913,6 +10913,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
