@@ -9647,7 +9647,7 @@ async def render_fragment(
     # --- Логика "тупика" ---
     # Используем временный список для частей текста, чтобы избежать частых конкатенаций строк
     current_display_text_parts = [base_text_for_display if base_text_for_display else ""] # Убедимся, что base_text_for_display не None
-    clean_current_display_text_parts = await clean_html_for_telegram_final(current_display_text_parts)
+    clean_current_display_text_parts = await clean_html_for_telegram_final("".join(current_display_text_parts))
 
     if choices_data and visible_button_count == 0 and not auto_transition_target_fragment_id:
         if not neuro_mode: # Предполагаем, что в нейро-режиме тупиков быть не должно, или они обрабатываются иначе
