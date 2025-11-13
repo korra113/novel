@@ -2329,7 +2329,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 webapp_url = f"https://novel-qg4c.onrender.com/{user_id_str}"
                 keyboard = [
                     [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-                    [InlineKeyboardButton("🦊Создать/редактировать через web", url=webapp_url)],
+                    [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
                     [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
                     [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
                     [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
@@ -2390,7 +2390,7 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     webapp_url = f"https://novel-qg4c.onrender.com/{user_id}"
     keyboard = [
         [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-        [InlineKeyboardButton("🦊Создать/редактировать через web", url=webapp_url)],
+        [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
         [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
         [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
         [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
@@ -9191,11 +9191,19 @@ def apply_effect_values(base_text, effects_dict):
     """
     Подставляет значения атрибутов и обрабатывает логические блоки вида {{сила:>2}}...{{сила}},
     включая случай, когда в тексте сохранены HTML-экранированные символы (&gt;, &lt;).
+    Нечувствительно к регистру и лишним пробелам.
     """
-
+    logger.info(f"base_text: {base_text}")
+    logger.info(f"effects_dict: {effects_dict}")
     text = base_text
 
-    # --- 1. Декодируем HTML только внутри {{...}} ---
+    # --- 0. Подготовим нормализованный словарь атрибутов ---
+    # Все ключи приводим к нижнему регистру и убираем пробелы
+    normalized_effects = {
+        k.strip().lower(): v for k, v in effects_dict.items()
+    }
+
+    # --- 1. Декодируем HTML внутри {{...}} ---
     def html_unescape_inside_braces(match):
         inner = match.group(1)
         inner_unescaped = (inner
@@ -9220,9 +9228,10 @@ def apply_effect_values(base_text, effects_dict):
         num2 = match.group(4)
         inner_text = match.group(5)
 
-        value = effects_dict.get(attr)
+        value = normalized_effects.get(attr)
         if value is None:
-            return ""  # атрибута нет
+            logger.debug(f"Нет значения для '{attr}' — блок пропущен.")
+            return ""
 
         # случайный диапазон
         if num2:
@@ -9230,15 +9239,17 @@ def apply_effect_values(base_text, effects_dict):
         else:
             check_num = num1
 
-        # проверка
-        result = False
+        # проверка условия
         if op == ">":
             result = value > check_num
         elif op == "<":
             result = value < check_num
         elif op == "=":
             result = value == check_num
+        else:
+            result = False
 
+        logger.debug(f"Проверка {attr} ({value} {op} {check_num}) -> {result}")
         return inner_text if result else ""
 
     text = re.sub(logic_pattern, logic_replacer, text)
@@ -9247,11 +9258,11 @@ def apply_effect_values(base_text, effects_dict):
     def value_replacer(match):
         attr = match.group(1).strip().lower()
 
-        # если внутри встречаются операторы — пользователь забыл закрыть конструкцию, оставляем как есть
+        # если внутри встречаются операторы — оставляем без изменений
         if re.search(r"[:<>=\-]", attr):
             return "{{" + match.group(1) + "}}"
 
-        value = effects_dict.get(attr)
+        value = normalized_effects.get(attr)
         return str(value) if value is not None else "{{" + match.group(1) + "}}"
 
     text = re.sub(r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*\}\}", value_replacer, text)
@@ -9260,6 +9271,7 @@ def apply_effect_values(base_text, effects_dict):
     if not text.strip():
         return "Нет текста для отображения в текущем прохождении из-за несоответствия атрибутам."
 
+    logger.info(f"text: {text}")
     return text
 # --- Логика создания истории (ConversationHandler) ---
 
@@ -10996,6 +11008,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
