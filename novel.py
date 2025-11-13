@@ -9186,15 +9186,79 @@ def evaluate_choice_for_display(
 
 
 def apply_effect_values(base_text, effects_dict):
-    def replacer(match):
-        key = match.group(1).strip().lower()
-        value = effects_dict.get(key)
-        if value is not None:
-            return f"{key}:{value}"
+    """
+    Подставляет значения атрибутов и обрабатывает логические блоки вида {{сила:>2}}...{{сила}},
+    включая случай, когда в тексте сохранены HTML-экранированные символы (&gt;, &lt;).
+    """
+
+    text = base_text
+
+    # --- 1. Декодируем HTML только внутри {{...}} ---
+    def html_unescape_inside_braces(match):
+        inner = match.group(1)
+        inner_unescaped = (inner
+            .replace("&gt;", ">")
+            .replace("&lt;", "<")
+            .replace("&amp;", "&")
+        )
+        return "{{" + inner_unescaped + "}}"
+
+    text = re.sub(r"\{\{(.*?)\}\}", html_unescape_inside_braces, text, flags=re.DOTALL)
+
+    # --- 2. Логические блоки {{атрибут:операторчисло(-число)}}...{{атрибут}} ---
+    logic_pattern = re.compile(
+        r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*:\s*([<>=])\s*(\d+)(?:\s*-\s*(\d+))?\s*\}\}(.*?)\{\{\s*\1\s*\}\}",
+        re.DOTALL | re.IGNORECASE
+    )
+
+    def logic_replacer(match):
+        attr = match.group(1).strip().lower()
+        op = match.group(2)
+        num1 = int(match.group(3))
+        num2 = match.group(4)
+        inner_text = match.group(5)
+
+        value = effects_dict.get(attr)
+        if value is None:
+            return ""  # атрибута нет
+
+        # случайный диапазон
+        if num2:
+            check_num = random.randint(min(num1, int(num2)), max(num1, int(num2)))
         else:
-            return f"{key}:не найдено"
-    
-    return re.sub(r"\{\{(.*?)\}\}", replacer, base_text)
+            check_num = num1
+
+        # проверка
+        result = False
+        if op == ">":
+            result = value > check_num
+        elif op == "<":
+            result = value < check_num
+        elif op == "=":
+            result = value == check_num
+
+        return inner_text if result else ""
+
+    text = re.sub(logic_pattern, logic_replacer, text)
+
+    # --- 3. Простые {{атрибут}} ---
+    def value_replacer(match):
+        attr = match.group(1).strip().lower()
+
+        # если внутри встречаются операторы — пользователь забыл закрыть конструкцию, оставляем как есть
+        if re.search(r"[:<>=\-]", attr):
+            return "{{" + match.group(1) + "}}"
+
+        value = effects_dict.get(attr)
+        return str(value) if value is not None else "{{" + match.group(1) + "}}"
+
+    text = re.sub(r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*\}\}", value_replacer, text)
+
+    # --- 4. Если весь текст пуст ---
+    if not text.strip():
+        return "Нет текста для отображения в текущем прохождении из-за несоответствия атрибутам."
+
+    return text
 # --- Логика создания истории (ConversationHandler) ---
 
 async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -10930,6 +10994,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
