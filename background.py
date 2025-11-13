@@ -534,6 +534,186 @@ def delete_note_bookmark(user_id_str, story_id, note_id):
         return jsonify({"error": "Не удалось удалить заметку"}), 500
 
 
+@app.route('/api/story/<user_id_str>/<story_id>/effects', methods=['GET'])
+def get_story_effects(user_id_str, story_id):
+    from novel import load_all_user_stories
+    all_stories = load_all_user_stories(user_id_str)
+    story = all_stories.get(story_id)
+    logging.info(f'story: {story}')
+    if not story:
+        return jsonify({"error": "История не найдена"}), 404
+
+    used_effects = set()
+
+    # Пройти по всем фрагментам конкретной истории
+    fragments = story.get("fragments", {})
+    for fragment_id, fragment_data in fragments.items():
+        if not isinstance(fragment_data, dict):
+            continue
+        choices = fragment_data.get("choices", [])
+        for choice in choices:
+            for effect in choice.get("effects", []):
+                stat = effect.get("stat")
+                if stat:
+                    used_effects.add(stat.strip().lower())  # игнор регистра
+
+    logging.info(f'used_effects: {used_effects}')
+    return jsonify(sorted(list(used_effects)))
+
+
+
+# <-- 2. ДОБАВЬТЕ ЭТОТ НОВЫЙ МАРШРУТ (перед get_story) -->
+@app.route('/api/stories/<user_id_str>', methods=['GET'])
+def get_story_list(user_id_str):
+    """
+    Получает список историй (только метаданные) для пользователя.
+    """
+    from novel import load_all_user_stories # Импортируем здесь, как в вашем коде
+    
+    try:
+        all_stories = load_all_user_stories(user_id_str)
+        # Форматируем в удобный для клиента список
+        result = []
+
+        for story_id, story_data in all_stories.items():
+            result.append({
+                "id": story_id,
+                "title": story_data.get("title", "Без названия"),
+                "public": story_data.get("public", False),
+                "user_name": story_data.get("user_name", None)
+            })
+
+        return jsonify(result)
+    except Exception as e:
+        logger.info(f"Ошибка при получении списка историй для {user_id_str}: {e}")
+        return jsonify({"error": "Не удалось загрузить список историй"}), 500
+
+import uuid # <-- 1. ДОБАВЬТЕ ЭТОТ ИМПОРТ
+# <-- 3. ДОБАВЬТЕ ЭТОТ НОВЫЙ МАРШРУТ (после get_stories_list) -->
+@app.route('/api/stories/<user_id_str>/create', methods=['POST'])
+def create_new_story(user_id_str):
+    """
+    Создает новую пустую историю.
+    """
+    from novel import save_story_data # Импортируем здесь
+    try:
+        data = request.get_json()
+        title = data.get("title")
+        user_name = data.get("user_name") # Получаем из запроса
+        author_name = data.get("author_name", user_name) # Используем user_name или отдельное поле
+
+        if not title:
+            return jsonify({"error": "Название истории обязательно"}), 400
+
+        # Генерация уникального ID для истории
+        story_id = uuid.uuid4().hex[:10] # 10-значный ID
+
+        # Создание базовой структуры истории
+        new_story = {
+            "title": title,
+            "owner_id": user_id_str,
+            "user_name": user_name,
+            "author": author_name,
+            "public": False, # По умолчанию не публичная
+            "fragments": {
+                "main_1": {
+                    "text": "Начало вашей новой истории...",
+                    "choices": []
+                }
+            }
+            # Можете добавить другие поля по умолчанию, если нужно
+        }
+
+        # Сохраняем новую историю
+        save_story_data(user_id_str, story_id, new_story)
+
+        return jsonify({
+            "status": "ok", 
+            "story_id": story_id, 
+            "title": title
+        }), 201
+
+    except Exception as e:
+        logger.error(f"Ошибка при создании истории для {user_id_str}: {e}")
+        return jsonify({"error": "Не удалось создать историю"}), 500
+
+
+
+@app.route('/api/stories/<user_id_str>/<story_id>/delete', methods=['DELETE'])
+def delete_story(user_id_str, story_id):
+    """
+    Удаляет историю по user_id_str и story_id.
+    """
+    from firebase_admin import db
+    try:
+        ref = db.reference(f'users_story/{user_id_str}/{story_id}')
+        if ref.get() is None:
+            return jsonify({"error": "История не найдена"}), 404
+
+        ref.delete()
+        return jsonify({"status": "deleted", "story_id": story_id}), 200
+
+    except Exception as e:
+        logger.error(f"Ошибка при удалении истории {story_id} для {user_id_str}: {e}")
+        return jsonify({"error": "Не удалось удалить историю"}), 500
+
+
+@app.route('/api/story/<user_id_str>/<story_id>/public', methods=['POST'])
+def update_story_public_status(user_id_str, story_id):
+    from novel import load_all_user_stories, save_story_data
+
+    try:
+        data = request.get_json()
+        new_status = bool(data.get("public"))
+        user_name = data.get("user_name")
+
+        all_stories = load_all_user_stories(user_id_str)
+        story = all_stories.get(story_id)
+        if not story:
+            return jsonify({"error": "История не найдена"}), 404
+
+        story["public"] = new_status
+
+        # Добавляем user_name, если история публична и имя передано
+        if new_status and user_name:
+            story["user_name"] = user_name
+        elif not new_status:
+            # Если публичность снята — можно очистить имя, если хочешь
+            story.pop("user_name", None)
+
+        save_story_data(user_id_str, story_id, story)
+
+        return jsonify({
+            "status": "ok",
+            "public": new_status,
+            "user_name": story.get("user_name")
+        })
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении статуса публичности: {e}")
+        return jsonify({"error": "Не удалось обновить статус"}), 500
+
+
+
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_react_app(path):
+    if path != "" and os.path.exists(os.path.join(app.static_folder, path)):
+        # Если это файл из 'build' (вроде manifest.json) - отдаем его
+        return send_from_directory(app.static_folder, path)
+    else:
+        # Для всех остальных путей ( /userid, /userid_storyid ) - отдаем главный index.html
+        return send_from_directory(app.static_folder, 'index.html')
+
+
+
+
+
+
+
+
+
 @app.route('/')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
