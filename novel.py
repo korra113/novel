@@ -2196,6 +2196,36 @@ logger = logging.getLogger(__name__)
 # async def render_fragment(context, user_id, story_id, fragment_id, message, story): ...
 # active_timers: Dict[str, asyncio.Task] = {} (если render_fragment его использует глобально)
 
+
+
+
+
+async def training_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает пользователю варианты обучения."""
+    
+    # Если вызвано через кнопку — отвечаем callback'у
+    if update.callback_query:
+        await update.callback_query.answer()
+        target = update.callback_query.message
+    else:
+        target = update.message
+
+    keyboard = [
+        [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
+        [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],
+        [InlineKeyboardButton("🌃В Главное Меню🌃", callback_data='restart_callback')],
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await target.reply_text(
+        "Выберите вариант обучения:",
+        reply_markup=reply_markup
+    )
+
+
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает команды в личке и группах: запускает истории по ID или показывает меню."""
 
@@ -2332,7 +2362,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
                     [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
                     [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
-                    [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
+                    [InlineKeyboardButton("📔Пройти обучение", callback_data='training_menu')],
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2393,7 +2423,7 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
         [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
         [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
-        [InlineKeyboardButton("📔Пройти обучение", callback_data='play_000_000_main_1')],
+        [InlineKeyboardButton("📔Пройти обучение", callback_data='training_menu')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -10985,6 +11015,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(delete_message_callback, pattern="^delete_this_message$"))
     application.add_handler(CallbackQueryHandler(confirm_delete_story, pattern=r"^delete_story_\d+_.+"))
     application.add_handler(CallbackQueryHandler(delete_story_confirmed, pattern=r"^confirm_delete$"))    
+    application.add_handler(CallbackQueryHandler(training_menu, pattern=r"^training_menu$"))    
     #application.add_handler(CallbackQueryHandler(toggle_story_public_status, pattern=f"^{MAKE_PUBLIC_PREFIX}|{MAKE_PRIVATE_PREFIX}"))
     #application.add_handler(CallbackQueryHandler(download_story_handler, pattern=f"^{DOWNLOAD_STORY_PREFIX}"))
     application.add_handler(CallbackQueryHandler(view_public_stories_list, pattern='^public_stories$'))
@@ -11008,6 +11039,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
