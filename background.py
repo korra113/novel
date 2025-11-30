@@ -13,11 +13,10 @@ app = Flask(__name__, static_folder=BUILD_FOLDER, static_url_path='')
 logging.getLogger("httpx").setLevel(logging.WARNING) # Уменьшает спам от http запросов
 logger = logging.getLogger(__name__)
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-
 def validate_fragment_name(name):
-    if name != "main_1" and name.startswith("main_1"):
+    if name == "main_1":
         return False, "Фрагмент main_1 является началом и не может быть переименован."
-
+        
     if len(name) > 17:
         return False, "Название не должно быть длиннее 17 символов."
     if not re.match(r'^[a-zA-Zа-яА-Я0-9_]+$', name):
@@ -108,6 +107,10 @@ def rename_fragment(user_id_str, story_id, old_name):
     data = request.get_json()
     new_name = data.get("newName")
 
+    # 🚫 Блокируем попытку переименовать main_1
+    if old_name == "main_1":
+        return jsonify({"error": "Нельзя переименовывать начальный фрагмент main_1"}), 400
+
     if not new_name:
         return jsonify({"error": "Новое имя не предоставлено"}), 400
 
@@ -122,7 +125,7 @@ def rename_fragment(user_id_str, story_id, old_name):
 
     if old_name not in story["fragments"]:
         return jsonify({"error": "Исходный фрагмент не найден"}), 404
-        
+
     if new_name in story["fragments"] and old_name != new_name:
         return jsonify({"error": "Фрагмент с таким именем уже существует"}), 409
 
