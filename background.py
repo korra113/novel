@@ -558,7 +558,7 @@ def get_story_effects(user_id_str, story_id):
             for effect in choice.get("effects", []):
                 stat = effect.get("stat")
                 if stat:
-                    used_effects.add(stat.strip().lower())  # игнор регистра
+                    used_effects.add(stat.strip())  # <-- убрано .lower()
 
     logging.info(f'used_effects: {used_effects}')
     return jsonify(sorted(list(used_effects)))
