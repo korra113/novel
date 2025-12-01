@@ -1155,6 +1155,8 @@ async def process_choice_effects_to_user_attributes(
 
     for effect in effects_list:
         stat_name = effect.get("stat")
+        if stat_name:
+            stat_name = stat_name.lower()
         logger.info(f"stat-===================: {stat_name}")        
         value_str = effect.get("value", "")
         hide_effect = effect.get("hide", False)
@@ -1539,6 +1541,8 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
                 if action_type != "check": continue
                 
                 stat_name = effect.get("stat")
+                if stat_name:
+                    stat_name = stat_name.lower()
                 if not stat_name or num_req is None: continue
 
                 user_stat_val = user_attributes.get(stat_name)
@@ -9329,6 +9333,8 @@ def evaluate_choice_for_display(
 
     for effect in effects_list:
         stat_name = effect.get("stat")
+        if stat_name:
+            stat_name = stat_name.lower()
         value_str = effect.get("value", "")
         hide_effect = effect.get("hide", False)
 
@@ -11194,6 +11200,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
