@@ -1444,7 +1444,8 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
 
     # 3. Подготовка контента сообщения
     raw_caption = fragment.get("text", "")
-    caption = clean_caption(replace_attributes_in_text(raw_caption, user_attributes))[:1000]
+    caption = advanced_replace_attributes(raw_caption, user_attributes)
+    caption = clean_caption(caption)[:1000]
     
     choices = fragment.get("choices", [])
     media = fragment.get("media", [])
@@ -11193,6 +11194,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
