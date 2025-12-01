@@ -76,7 +76,8 @@ from google.genai.types import (
     SafetySetting,
     Tool,
 )
-
+from telegram.helpers import escape_markdown
+from telegram.constants import ParseMode
 
 GOOGLE_API_KEY = "AIzaSyA56x-9b-w3p-MNIi2eq5Q9rq53tz9o0bE"
 
@@ -671,37 +672,59 @@ def load_data() -> dict:
         logger.error(f"Неожиданная ошибка при загрузке данных из Firebase: {e}. Возвращена пустая структура.")
         return {"users_story": {}, "story_settings": {}}
 
-def save_story_data(user_id_str: str, story_id: str, story_content: dict):
+def load_story_by_id(story_id: str) -> dict | None:
     """
-    Сохраняет данные конкретной истории для конкретного пользователя
-    в Firebase Realtime Database по пути 'users_story/{user_id_str}/{story_id}'.
-    Предварительно загружает актуальные данные, чтобы избежать перезаписи
-    изменений, внесённых параллельно другим пользователем.
+    Получает историю по story_id через индекс stories_index.
     """
     try:
-        
+        index = db.reference(f"stories_index/{story_id}").get()
+        if not index or "owner_id" not in index:
+            return None
+
+        owner = index["owner_id"]
+        story = db.reference(f"users_story/{owner}/{story_id}").get()
+        return story
+
+    except Exception as e:
+        logger.error(f"Ошибка поиска истории {story_id}: {e}")
+        return None
+
+
+
+def save_story_data(user_id_str: str, story_id: str, story_content: dict):
+    """
+    Сохраняет историю по пути:
+        users_story/{user_id_str}/{story_id}
+    И создаёт индекс:
+        stories_index/{story_id} = {owner_id: user_id_str}
+    Для быстрого поиска историй без знания user_id.
+    """
+    try:
         if not firebase_admin._DEFAULT_APP_NAME:
-            logger.error("Firebase приложение не инициализировано. Невозможно сохранить данные истории.")
+            logger.error("Firebase приложение не инициализировано. Сохранение отменено.")
             return
 
-        ref = db.reference(f'users_story/{user_id_str}/{story_id}')
-        
-        # Загрузка актуальных данных перед сохранением
-        current_data = ref.get()
-        if current_data is None:
-            current_data = {}
+        # --- 1. Сохранение самой истории
+        story_ref = db.reference(f'users_story/{user_id_str}/{story_id}')
 
-        # Обновление данных — можно заменить на более интеллектуальное слияние
+        current_data = story_ref.get() or {}
         current_data.update(story_content)
+        story_ref.set(current_data)
 
-        # Сохраняем объединённые данные
-        ref.set(current_data)
+        # --- 2. Сохранение индекса истории
+        index_ref = db.reference(f'stories_index/{story_id}')
+        index_ref.set({
+            "owner_id": user_id_str,
+            "updated": int(time.time())  # по желанию — можно хранить timestamp
+        })
 
-        logger.info(f"Актуализированные данные для истории {story_id} пользователя {user_id_str} сохранены в Firebase.")
+        logger.info(f"История {story_id} сохранена. Индекс stories_index обновлён → {user_id_str}")
+
     except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при сохранении данных истории {story_id} для пользователя {user_id_str}: {e}")
+        logger.error(f"Ошибка Firebase при сохранении истории {story_id}: {e}")
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при сохранении данных истории в Firebase: {e}")
+        logger.error(f"Неожиданная ошибка при сохранении истории: {e}")
+
 
 def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
     """
@@ -779,6 +802,33 @@ def delete_story_bookmark(user_id_str: str, story_id: str, note_id: str):
         logger.error(f"Ошибка при удалении заметки {note_id} для истории {story_id}: {e}")
         return False
 
+def save_node_positions(user_id_str: str, story_id: str, positions: dict):
+    """
+    Сохраняет позиции узлов для карты конкретной истории.
+    Использует путь 'story_maps/{user_id_str}/{story_id}'.
+    Метод .set() полностью перезаписывает данные, что является
+    корректным поведением для сохранения полного набора координат.
+    """
+    try:
+        
+        ref = db.reference(f'story_maps/{user_id_str}/{story_id}')
+        ref.set(positions)
+        logger.info(f"Позиции узлов для истории {story_id} сохранены.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении позиций узлов для истории {story_id}: {e}")
+
+def load_node_positions(user_id_str: str, story_id: str):
+    """
+    Загружает сохраненные позиции узлов для карты конкретной истории.
+    """
+    try:
+        
+        ref = db.reference(f'story_maps/{user_id_str}/{story_id}')
+        positions = ref.get()
+        return positions if positions else None
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке позиций узлов для истории {story_id}: {e}")
+        return None
 
 def get_owner_id_or_raise(user_id: int, story_id: str, story_data: dict) -> str:
     """
@@ -1015,33 +1065,52 @@ def load_story_state_from_firebase(inline_message_id: str) -> dict | None:
 
 
 
-def save_node_positions(user_id_str: str, story_id: str, positions: dict):
-    """
-    Сохраняет позиции узлов для карты конкретной истории.
-    Использует путь 'story_maps/{user_id_str}/{story_id}'.
-    Метод .set() полностью перезаписывает данные, что является
-    корректным поведением для сохранения полного набора координат.
-    """
-    try:
-        
-        ref = db.reference(f'story_maps/{user_id_str}/{story_id}')
-        ref.set(positions)
-        logger.info(f"Позиции узлов для истории {story_id} сохранены.")
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении позиций узлов для истории {story_id}: {e}")
 
-def load_node_positions(user_id_str: str, story_id: str):
+async def transfer_to_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Загружает сохраненные позиции узлов для карты конкретной истории.
+    Переносит все истории из users_story → stories_index
+    только если у истории есть owner_id.
+    Используется один раз при миграции структуры хранения.
     """
     try:
+        users_story_ref = db.reference("users_story")
+        users_story_data = users_story_ref.get()
+
+        if not users_story_data:
+            await update.message.reply_text("⚠ users_story пуст — нечего переносить.")
+            return
+
+        migrated = 0
+        skipped = 0
+
+        for user_id, stories in users_story_data.items():
+            if not isinstance(stories, dict):
+                continue
+            
+            for story_id, story_data in stories.items():
+                owner_id = story_data.get("owner_id")
+
+                if not owner_id:
+                    skipped += 1
+                    continue  # пропускаем истории без владельца
+
+                index_ref = db.reference(f"stories_index/{story_id}")
+                index_ref.set({
+                    "owner_id": owner_id,
+                    "updated": int(time.time())
+                })
+
+                migrated += 1
         
-        ref = db.reference(f'story_maps/{user_id_str}/{story_id}')
-        positions = ref.get()
-        return positions if positions else None
+        await update.message.reply_text(
+            f"✔ Перенос завершён.\n"
+            f"📦 Создано записей: {migrated}\n"
+            f"⛔ Пропущено (нет owner_id): {skipped}"
+        )
+
     except Exception as e:
-        logger.error(f"Ошибка при загрузке позиций узлов для истории {story_id}: {e}")
-        return None
+        await update.message.reply_text(f"❌ Ошибка переноса: {e}")
+
 
 
 #===============================================================        
@@ -1055,30 +1124,6 @@ from telegram.ext import CallbackContext
 
 
 
-def check_choice_requirements(effects: list, user_attributes: dict) -> list[str]:
-    errors = []
-
-    for effect in effects:
-        stat = effect.get("stat")
-        value = effect.get("value")
-        effect_type, op, number = _parse_effect_value(value)
-
-        if effect_type == "check":
-            if stat not in user_attributes:
-                errors.append(f"{stat}: отсутствует")
-                continue
-
-            current_value = user_attributes[stat]
-
-            if op == ">" and not (current_value > number):
-                errors.append(f"{stat}: требуется > {number}, текущее значение {current_value}")
-            elif op == "<" and not (current_value < number):
-                errors.append(f"{stat}: требуется < {number}, текущее значение {current_value}")
-            elif op == "=" and not (current_value == number):
-                errors.append(f"{stat}: требуется = {number}, текущее значение {current_value}")
-
-    return errors
-
 
 async def process_choice_effects_to_user_attributes(
     inline_message_id: str,
@@ -1091,7 +1136,18 @@ async def process_choice_effects_to_user_attributes(
     Обрабатывает эффекты: set/modify, в том числе с диапазонами и модификаторами.
     """
     story_state = load_story_state_from_firebase(inline_message_id)
-    user_attr = story_state.get("user_attributes", {})
+
+    # --- привести user_attributes к нижнему регистру ---
+    raw_attr = story_state.get("user_attributes", {})
+    normalized_attr = {}
+
+    for key, val in raw_attr.items():
+        normalized_attr[key.lower()] = val
+
+    story_state["user_attributes"] = normalized_attr
+    # ----------------------------------------------------
+
+    user_attr = story_state["user_attributes"]
     temp_user_attr = dict(user_attr)
 
     success_alert_parts = []
@@ -1099,6 +1155,7 @@ async def process_choice_effects_to_user_attributes(
 
     for effect in effects_list:
         stat_name = effect.get("stat")
+        logger.info(f"stat-===================: {stat_name}")        
         value_str = effect.get("value", "")
         hide_effect = effect.get("hide", False)
         modifiers = effect.get("modifiers")
@@ -1175,14 +1232,95 @@ def clean_caption(text: str) -> str:
     return cleaned.strip()
 
 
-def replace_attributes_in_text(text: str, user_attributes: dict) -> str:
-    def replace_match(match):
-        key = match.group(1)
-        if key in user_attributes:
-            return f"{key}: {user_attributes[key]}"
+def advanced_replace_attributes(text: str, group_attributes: dict) -> str:
+    """
+    Продвинутая версия replace_attributes_in_text.
+    
+    Работает:
+    - {{сила}} → подставляет МАКС значение среди всех игроков
+    - {{сила: >6}}текст{{сила}} → показывает текст если атрибут удовлетворён
+    - диапазоны {{удача: 3-8}}
+    - HTML-escape (&gt; &lt;)
+    - нечувствителен к регистру
+    """
+    from html import unescape
+
+    # --- 1. Нормализуем имена атрибутов ---
+    # ПРОСТОЙ режим: group_attributes = {"сила": 5, "удача": 3}
+    normalized = {}
+    for k, v in group_attributes.items():
+        k2 = k.strip().lower()
+        normalized.setdefault(k2, []).append(v)
+
+    # Теперь normalized = {"сила": [5,7], "удача":[3]}
+
+    def get_max_value(attr):
+        arr = normalized.get(attr.lower())
+        if not arr:
+            return None
+        return max(arr)
+
+    # --- 2. Снимаем HTML экранирование внутри {{...}} ---
+    def html_unescape_inside(match):
+        inner = unescape(match.group(1))
+        return "{{" + inner + "}}"
+
+    text = re.sub(r"\{\{(.*?)\}\}", html_unescape_inside, text, flags=re.DOTALL)
+
+    # --- 3. Логические блоки ---
+    # {{стат: >6}}текст{{стат}}
+    logic_pattern = re.compile(
+        r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*:\s*([<>=])\s*(\d+)(?:\s*-\s*(\d+))?\s*\}\}(.*?)\{\{\s*\1\s*\}\}",
+        re.DOTALL | re.IGNORECASE
+    )
+
+    def logic_replacer(match):
+        attr = match.group(1).strip().lower()
+        op   = match.group(2)
+        num1 = int(match.group(3))
+        num2 = match.group(4)
+        inside_text = match.group(5)
+
+        current_value = get_max_value(attr)
+        if current_value is None:
+            return ""  # нет атрибута вообще
+
+        # диапазон
+        if num2:
+            check_num = random.randint(min(num1, int(num2)), max(num1, int(num2)))
         else:
-            return f"Атрибут ({key}) отсутствует"
-    return re.sub(r"\{\{(.*?)\}\}", replace_match, text)
+            check_num = num1
+
+        # проверка условия
+        if op == ">":
+            ok = current_value > check_num
+        elif op == "<":
+            ok = current_value < check_num
+        else:
+            ok = current_value == check_num
+
+        return inside_text if ok else ""
+
+    text = re.sub(logic_pattern, logic_replacer, text)
+
+    # --- 4. Простые {{атрибут}} ---
+    def simple_replacer(match):
+        key = match.group(1).strip().lower()
+
+        # если это логическая конструкция — пропускаем
+        if re.search(r"[:<>=\-]", key):
+            return "{{" + key + "}}"
+
+        v = get_max_value(key)
+        return str(v) if v is not None else f"({key}: нет данных)"
+
+    text = re.sub(r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*\}\}", simple_replacer, text)
+
+    # --- 5. Если ничего не осталось ---
+    if not text.strip():
+        return "Нет текста для отображения — условия не выполнены."
+
+    return text
 
 def deserialize_votes_from_db(votes_data) -> dict:
     """
@@ -1229,29 +1367,31 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
     log_prefix = f"[{inline_message_id}][{story_id}][{fragment_id}]"
     logger.info(f"{log_prefix} Отображение фрагмента для пользователя {target_user_id_str}.")
 
-    # 1. Загрузка и проверка определений истории и фрагмента
-    all_data = load_data()
-    story_definition = None
-    for user_key, user_stories in all_data.get("users_story", {}).items():
-        if story_id in user_stories:
-            story_definition = user_stories[story_id]
-            break
+    # --- NEW: загружаем историю напрямую через индекс ---
+    story_definition = load_story_by_id(story_id)
 
     if not story_definition:
-        logger.warning(f"{log_prefix} ОШИБКА: Определение истории не найдено.")
+        logger.warning(f"{log_prefix} ❗ История не найдена.")
         try:
-            await context.bot.edit_message_text(inline_message_id=inline_message_id, text="История не найдена.")
+            await context.bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text="История не найдена."
+            )
         except Exception as e:
-            logger.error(f"{log_prefix} Не удалось отправить сообщение об ошибке 'история не найдена': {e}")
+            logger.error(f"{log_prefix} Ошибка при отправке уведомления: {e}")
         return
 
+    # --- Далее как у тебя было ---
     fragment = story_definition.get("fragments", {}).get(fragment_id)
     if not fragment:
-        logger.warning(f"{log_prefix} ОШИБКА: Определение фрагмента не найдено.")
+        logger.warning(f"{log_prefix} ❗ Фрагмент не найден.")
         try:
-            await context.bot.edit_message_text(inline_message_id=inline_message_id, text="Фрагмент не найден.")
+            await context.bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text="Фрагмент не найден."
+            )
         except Exception as e:
-            logger.error(f"{log_prefix} Не удалось отправить сообщение об ошибке 'фрагмент не найден': {e}")
+            logger.error(f"{log_prefix} Ошибка отправки: {e}")
         return
 
     # 2. Инициализация переменных и состояния
@@ -9079,6 +9219,9 @@ async def process_choice_effects_on_click(
 
     for effect in effects_list:
         stat_name = effect.get("stat")
+        if stat_name:
+            stat_name = stat_name.lower()
+
         value_str = effect.get("value", "")
         hide_effect = effect.get("hide", False)
         
@@ -9214,6 +9357,8 @@ def evaluate_choice_for_display(
     
     req_text = f" ({', '.join(requirement_parts)})" if requirement_parts else ""
     return True, req_text
+
+
 
 
 
@@ -9365,7 +9510,7 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
     # --- Загрузка определения истории ---
-    story_data_found = load_user_story(actual_user_id, story_id_from_data)
+    story_data_found = load_story_by_id(story_id_from_data)
     if not story_data_found:
         story_data_found = load_story_by_id_fallback(story_id_from_data)
     
@@ -9391,6 +9536,8 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         # Это нажатие на обычную кнопку выбора, не "начать историю".
         # Эффекты определены в выборе внутри *исходного* фрагмента.
+        if target_fragment_id_cleaned == "main_912e":
+            target_fragment_id_cleaned = "main_1"        
         user_progress_before_click = load_user_story_progress(story_id_from_data, actual_user_id)
         source_fragment_id = user_progress_before_click.get("fragment_id")
 
@@ -9744,6 +9891,13 @@ async def render_fragment(
             target_with_index = f"{target}id{count}"
         else:
             target_with_index = target
+
+        # >>> ДОБАВЛЯЕМ ВАШЕ УСЛОВИЕ <<<
+        if target_with_index == "main_1":
+            target_with_index = "main_912e"
+        # <<< КОНЕЦ ДОБАВЛЕНИЯ >>>
+
+
         logger.info(f"target_with_index: {target_with_index}")
         button_display_text = text + requirement_text
         button_callback_data = f"play_{user_id}_{story_id}_{target_with_index}"
@@ -11039,7 +11193,6 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
 
 
 
