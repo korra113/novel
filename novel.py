@@ -450,7 +450,6 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"Ошибка при обработке: {e}")
         return ADMIN_UPLOAD
 
-
 def load_story_settings(inline_message_id: str) -> dict:
     """
     Загружает конкретные настройки истории по ключу inline_message_id из 'story_settings'.
@@ -691,71 +690,40 @@ def load_story_by_id(story_id: str) -> dict | None:
 
 
 
-def _save_story_state_to_firebase_sync(inline_message_id: str, story_state_data: dict):
+
+def save_story_data(user_id_str: str, story_id: str, story_content: dict):
     """
-    Внутренняя синхронная функция для выполнения блокирующего I/O.
+    Сохраняет историю по пути:
+        users_story/{user_id_str}/{story_id}
+    И создаёт индекс:
+        stories_index/{story_id} = {owner_id: user_id_str}
+    Для быстрого поиска историй без знания user_id.
     """
-    if not inline_message_id:
-        logger.error("save_story_state_to_firebase: inline_message_id is required.")
-        return
-    
-    ref = db.reference(f'story_settings/{inline_message_id}')
-    
-    # Получаем существующие данные (БЛОКИРУЮЩИЙ ЗАПРОС)
-    existing_data = ref.get() or {}
-    existing_data.update(story_state_data)
-    
-    if 'launch_time' not in existing_data and 'launch_time' not in story_state_data :
-        now_utc = datetime.datetime.utcnow()
-        story_state_data['launch_time'] = {
-            'year': now_utc.year,
-            'day': now_utc.day,
-            'hour': now_utc.hour,
-            'minute': now_utc.minute,
-            'iso_timestamp_utc': now_utc.isoformat()
-        }
-        logger.info(f"Setting initial launch_time for {inline_message_id}")
-    elif 'launch_time' in existing_data and 'launch_time' not in story_state_data:
-        story_state_data['launch_time'] = existing_data['launch_time']
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase приложение не инициализировано. Сохранение отменено.")
+            return
 
-    # Логика конвертации типов (set -> list и т.д.)
-    if 'poll_details' in story_state_data and story_state_data['poll_details']:
-        poll_details = story_state_data['poll_details']
-        if 'votes' in poll_details:
-            votes_data = poll_details['votes']
-            if isinstance(votes_data, dict):
-                story_state_data['poll_details']['votes'] = {
-                    str(idx): list(user_set or [])
-                    for idx, user_set in votes_data.items()
-                }
-            elif isinstance(votes_data, list):
-                story_state_data['poll_details']['votes'] = {
-                    str(i): list(v) if isinstance(v, list) else []
-                    for i, v in enumerate(votes_data)
-                }
-        if 'voted_users' in poll_details and isinstance(poll_details['voted_users'], set):
-            poll_details['voted_users'] = list(poll_details['voted_users'])
+        # --- 1. Сохранение самой истории
+        story_ref = db.reference(f'users_story/{user_id_str}/{story_id}')
 
-    logger.info(f"Saving to Firebase for {inline_message_id}: {story_state_data}")
-    
-    # Сохраняем данные (БЛОКИРУЮЩИЙ ЗАПРОС)
-    ref.set(story_state_data)
+        current_data = story_ref.get() or {}
+        current_data.update(story_content)
+        story_ref.set(current_data)
 
+        # --- 2. Сохранение индекса истории
+        index_ref = db.reference(f'stories_index/{story_id}')
+        index_ref.set({
+            "owner_id": user_id_str,
+            "updated": int(time.time())  # по желанию — можно хранить timestamp
+        })
 
-# 2. Создаем новую асинхронную функцию-обертку
-async def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict):
-    """
-    Асинхронная обертка. Безопасно запускает сохранение в отдельном потоке,
-    не блокируя основной цикл событий бота.
-    """
-    # ВАЖНО: Делаем полную копию данных перед передачей в поток.
-    # Если этого не сделать, и основной бот изменит словарь story_state_data 
-    # во время сохранения, возникнет ошибка или запишутся битые данные.
-    data_copy = copy.deepcopy(story_state_data)
-    
-    # Запускаем синхронную функцию в отдельном потоке
-    await asyncio.to_thread(_save_story_state_to_firebase_sync, inline_message_id, data_copy)
+        logger.info(f"История {story_id} сохранена. Индекс stories_index обновлён → {user_id_str}")
 
+    except firebase_admin.exceptions.FirebaseError as e:
+        logger.error(f"Ошибка Firebase при сохранении истории {story_id}: {e}")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при сохранении истории: {e}")
 
 
 def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
@@ -834,6 +802,7 @@ def delete_story_bookmark(user_id_str: str, story_id: str, note_id: str):
         logger.error(f"Ошибка при удалении заметки {note_id} для истории {story_id}: {e}")
         return False
 
+
 def save_node_positions(user_id_str: str, story_id: str, positions: dict):
     """
     Сохраняет позиции узлов для карты конкретной истории.
@@ -861,6 +830,15 @@ def load_node_positions(user_id_str: str, story_id: str):
     except Exception as e:
         logger.error(f"Ошибка при загрузке позиций узлов для истории {story_id}: {e}")
         return None
+
+
+
+
+
+
+
+
+
 
 def get_owner_id_or_raise(user_id: int, story_id: str, story_data: dict) -> str:
     """
@@ -966,19 +944,17 @@ async def delete_story_confirmed(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
-def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict):
+def _save_story_state_to_firebase_sync(inline_message_id: str, story_state_data: dict):
     """
-    Сохраняет полное состояние истории/голосования в Firebase.
-    Добавляет или обновляет время запуска.
+    Внутренняя синхронная функция для выполнения блокирующего I/O.
     """
-    
     if not inline_message_id:
         logger.error("save_story_state_to_firebase: inline_message_id is required.")
         return
-
-    ref = db.reference(f'story_settings/{inline_message_id}') # Замените db.reference реальной функцией
     
-    # Получаем существующие данные, чтобы не перезаписать launch_time если оно уже есть
+    ref = db.reference(f'story_settings/{inline_message_id}')
+    
+    # Получаем существующие данные (БЛОКИРУЮЩИЙ ЗАПРОС)
     existing_data = ref.get() or {}
     existing_data.update(story_state_data)
     
@@ -986,41 +962,52 @@ def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict)
         now_utc = datetime.datetime.utcnow()
         story_state_data['launch_time'] = {
             'year': now_utc.year,
-            'day': now_utc.day, # День месяца
+            'day': now_utc.day,
             'hour': now_utc.hour,
             'minute': now_utc.minute,
-            'iso_timestamp_utc': now_utc.isoformat() # Для удобства
+            'iso_timestamp_utc': now_utc.isoformat()
         }
         logger.info(f"Setting initial launch_time for {inline_message_id}")
     elif 'launch_time' in existing_data and 'launch_time' not in story_state_data:
-        story_state_data['launch_time'] = existing_data['launch_time'] # Сохраняем существующее время
+        story_state_data['launch_time'] = existing_data['launch_time']
 
-    # Конвертируем set в list для Firebase (JSON)
+    # Логика конвертации типов (set -> list и т.д.)
     if 'poll_details' in story_state_data and story_state_data['poll_details']:
         poll_details = story_state_data['poll_details']
-    
         if 'votes' in poll_details:
             votes_data = poll_details['votes']
-    
             if isinstance(votes_data, dict):
-                # Конвертируем dict с None в [] и ключи в строки
                 story_state_data['poll_details']['votes'] = {
-                    str(idx): list(user_set or [])  # None → []
+                    str(idx): list(user_set or [])
                     for idx, user_set in votes_data.items()
                 }
-    
             elif isinstance(votes_data, list):
-                # Превращаем список в словарь, гарантируя отсутствие None
                 story_state_data['poll_details']['votes'] = {
                     str(i): list(v) if isinstance(v, list) else []
                     for i, v in enumerate(votes_data)
                 }
-    
         if 'voted_users' in poll_details and isinstance(poll_details['voted_users'], set):
             poll_details['voted_users'] = list(poll_details['voted_users'])
 
     logger.info(f"Saving to Firebase for {inline_message_id}: {story_state_data}")
+    
+    # Сохраняем данные (БЛОКИРУЮЩИЙ ЗАПРОС)
     ref.set(story_state_data)
+
+
+# 2. Создаем новую асинхронную функцию-обертку
+async def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict):
+    """
+    Асинхронная обертка. Безопасно запускает сохранение в отдельном потоке,
+    не блокируя основной цикл событий бота.
+    """
+    # ВАЖНО: Делаем полную копию данных перед передачей в поток.
+    # Если этого не сделать, и основной бот изменит словарь story_state_data 
+    # во время сохранения, возникнет ошибка или запишутся битые данные.
+    data_copy = copy.deepcopy(story_state_data)
+    
+    # Запускаем синхронную функцию в отдельном потоке
+    await asyncio.to_thread(_save_story_state_to_firebase_sync, inline_message_id, data_copy)
 
 
 def update_user_attributes(inline_message_id: str, user_attributes: dict):
@@ -1028,11 +1015,10 @@ def update_user_attributes(inline_message_id: str, user_attributes: dict):
     Обновляет только поле 'user_attributes' в story_settings/{inline_message_id}, 
     не затрагивая другие поля.
     """
-    
     if not inline_message_id:
         logger.error("update_user_attributes: inline_message_id is required.")
         return
-
+    
     ref = db.reference(f'story_settings/{inline_message_id}/user_attributes')
     
     try:
@@ -1070,7 +1056,6 @@ def load_story_state_from_firebase(inline_message_id: str) -> dict | None:
     Загружает состояние истории/голосования из Firebase.
     Конвертирует данные из JSON-совместимых форматов обратно в нужные типы (например, list в set).
     """
-    
     if not inline_message_id:
         logger.error("load_story_state_from_firebase: inline_message_id is required.")
         return None
@@ -1142,6 +1127,13 @@ async def transfer_to_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка переноса: {e}")
+
+
+
+
+
+
+
 
 async def training_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает пользователю варианты обучения."""
@@ -1490,7 +1482,6 @@ async def transfer_story_command(update: Update, context: ContextTypes.DEFAULT_T
             )
         except:
             pass
-
 
 #===============================================================        
 STORY_LOCKS = defaultdict(asyncio.Lock)
@@ -11629,6 +11620,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
