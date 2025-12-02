@@ -1190,11 +1190,16 @@ async def process_choice_effects_to_user_attributes(
                 (op_char == '=' and val_for_calc == numeric_val)
             )
             if not check_passed:
-                reason = f"Проверка не пройдена: {stat_name} {op_char}{numeric_val} (у вас: {val_for_calc})"
-                if len(reason) > 200:
-                    reason = reason[:197] + "..."
-                failure_reasons.append(reason)
-                break  # Цепочка прерывается
+                if hide_effect:
+                    return False, "", True
+                else:
+                    reason = f"Требование: {original_stat_name} {op_char}{final_numeric_val} (тек: {val_for_check})"
+                    temp_effects_data[stat_name] = final_numeric_val
+                    user_progress["current_effects"] = temp_effects_data
+                    save_user_story_progress(story_id, user_id, user_progress)                     
+                    if len(reason) > MAX_ALERT_LENGTH: reason = reason[:MAX_ALERT_LENGTH-3]+"..."
+                    await query.answer(text=reason, show_alert=True)
+                    return False, "", False
 
         elif action_type == "set":
             temp_user_attr[stat_name] = numeric_val
@@ -1547,7 +1552,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
 
                 user_stat_val = user_attributes.get(stat_name)
                 try: user_stat_num = int(user_stat_val)
-                except (ValueError, TypeError): user_stat_num = None
+                except (ValueError, TypeError): user_stat_num = 0
 
                 check_passed = False
                 if user_stat_num is not None:
@@ -9544,7 +9549,8 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Это нажатие на обычную кнопку выбора, не "начать историю".
         # Эффекты определены в выборе внутри *исходного* фрагмента.
         if target_fragment_id_cleaned == "main_912e":
-            target_fragment_id_cleaned = "main_1"        
+            target_fragment_id_cleaned = "main_1"      
+            original_target_fragment_id = "main_1"      
         user_progress_before_click = load_user_story_progress(story_id_from_data, actual_user_id)
         source_fragment_id = user_progress_before_click.get("fragment_id")
 
@@ -11200,6 +11206,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
