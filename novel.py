@@ -10273,7 +10273,7 @@ async def render_fragment(
     for i, choice in enumerate(choices_data):
         text = choice.get("text")
         target = choice.get("target")
-        effects = choice.get("effects", [])
+        effects = choice.get("effects", [])     
         
         # Пропускаем авто-переходы
         try:
@@ -10309,8 +10309,8 @@ async def render_fragment(
             target_with_index = "main_912e"
         # <<< КОНЕЦ ДОБАВЛЕНИЯ >>>
 
-
         logger.info(f"target_with_index: {target_with_index}")
+
         button_display_text = text + requirement_text
         button_callback_data = f"play_{user_id}_{story_id}_{target_with_index}"
         inline_buttons.append([InlineKeyboardButton(button_display_text, callback_data=button_callback_data)])
@@ -10402,13 +10402,13 @@ async def render_fragment(
     try:
         if media_content:
             if len(media_content) > 1: # Медиа-группа
+                # --- ЛОГИКА МЕДИА-ГРУППЫ (Без изменений, так как группы плохо редактируются) ---
                 media_group_to_send = []
                 for i, m_item in enumerate(media_content):
                     m_type = m_item.get("type")
                     file_id = m_item.get("file_id")
-                    spoiler = m_item.get("spoiler", False) # Убедимся, что есть значение по умолчанию
+                    spoiler = m_item.get("spoiler", False)
                     
-                    # base_text_for_display используется для caption первого элемента
                     caption_for_item = final_base_text_for_display if i == 0 and final_base_text_for_display else None
                     
                     if m_type == "photo":
@@ -10417,23 +10417,23 @@ async def render_fragment(
                         media_group_to_send.append(InputMediaVideo(media=file_id, caption=caption_for_item, parse_mode=ParseMode.HTML if caption_for_item else None, has_spoiler=spoiler))
                     elif m_type == "animation":
                          media_group_to_send.append(InputMediaAnimation(media=file_id, caption=caption_for_item, parse_mode=ParseMode.HTML if caption_for_item else None, has_spoiler=spoiler))
-                    # Добавьте другие типы, если нужно (audio, document)
+                    elif m_type == "audio":
+                        # Аудио в группах поддерживаются специфично, но добавим для совместимости
+                        media_group_to_send.append(InputMediaAudio(media=file_id, caption=caption_for_item, parse_mode=ParseMode.HTML if caption_for_item else None))
 
-                if message_to_update: # Если есть старое сообщение, удаляем его, т.к. медиагруппу нельзя отредактировать в другое сообщение
+                if message_to_update: 
                     try:
                         await context.bot.delete_message(chat_id, message_to_update.message_id)
-                        message_to_update = None # Оно больше не актуально для редактирования
+                        message_to_update = None 
                     except (BadRequest, TelegramError): pass
                 
                 if media_group_to_send:
                     sent_media_messages = await context.bot.send_media_group(chat_id=chat_id, media=media_group_to_send)
                     if sent_media_messages:
-                        newly_sent_message_object = sent_media_messages[0] # Для ссылок и ID
-                        first_media_message_for_caption_edit = sent_media_messages[0] # Для timed_edit caption
+                        newly_sent_message_object = sent_media_messages[0]
                         final_message_ids_sent.extend([msg.message_id for msg in sent_media_messages])
-                    # Отправляем кнопки отдельным сообщением после медиагруппы, если они есть
                     if reply_markup:
-                        markup_msg = await context.bot.send_message(chat_id, "Кнопки выбора:", reply_markup=reply_markup) # Невидимый символ для отправки только клавиатуры
+                        markup_msg = await context.bot.send_message(chat_id, "Кнопки выбора:", reply_markup=reply_markup)
                         final_message_ids_sent.append(markup_msg.message_id)
 
             else: # Одиночное медиа
@@ -10441,70 +10441,75 @@ async def render_fragment(
                 media_type = item.get("type")
                 file_id = item.get("file_id")
                 spoiler = item.get("spoiler", False)
+                current_caption = final_base_text_for_display if final_base_text_for_display else None
 
                 can_edit_media = False
+                
                 if message_to_update:
-                    # Попытка отредактировать медиа (если тип совпадает и есть file_id)
-                    input_media_for_edit = None
-                    current_caption = final_base_text_for_display if final_base_text_for_display else None
-                    if media_type == "photo" and message_to_update.photo:
-                        input_media_for_edit = InputMediaPhoto(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, has_spoiler=spoiler)
-                    elif media_type == "video" and message_to_update.video:
-                        input_media_for_edit = InputMediaVideo(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, has_spoiler=spoiler)
-                    elif media_type == "animation" and message_to_update.animation:
-                        input_media_for_edit = InputMediaAnimation(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, has_spoiler=spoiler)
-                    # Добавьте другие типы, если нужно (audio)
-                    # Для audio edit_media не существует, можно только edit_message_caption
+                    # 1. Проверяем, является ли старое сообщение контейнером для медиа (любого типа)
+                    # Если старое сообщение было текстом, edit_media не сработает (нужен пересоздание)
+                    is_old_message_media = (
+                        message_to_update.photo or 
+                        message_to_update.video or 
+                        message_to_update.animation or 
+                        message_to_update.audio or 
+                        message_to_update.document
+                    )
 
-                    if input_media_for_edit:
-                        try:
-                            newly_sent_message_object = await message_to_update.edit_media(media=input_media_for_edit, reply_markup=reply_markup)
-                            can_edit_media = True
-                        except BadRequest: # Не получилось отредактировать (например, тип не совпал или др. ошибка)
-                            can_edit_media = False 
-                    elif media_type == "audio" and message_to_update.audio: # Аудио нельзя edit_media, только caption
-                        try:
-                            newly_sent_message_object = await message_to_update.edit_caption(caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, reply_markup=reply_markup)
-                            can_edit_media = True # Технически это редактирование caption, но сообщение сохранено
-                        except BadRequest:
-                            can_edit_media = False
+                    if is_old_message_media:
+                        # 2. Подготавливаем объект НОВОГО медиа
+                        input_media_for_edit = None
+                        
+                        if media_type == "photo":
+                            input_media_for_edit = InputMediaPhoto(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, has_spoiler=spoiler)
+                        elif media_type == "video":
+                            input_media_for_edit = InputMediaVideo(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, has_spoiler=spoiler)
+                        elif media_type == "animation":
+                            input_media_for_edit = InputMediaAnimation(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, has_spoiler=spoiler)
+                        elif media_type == "audio":
+                            input_media_for_edit = InputMediaAudio(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None)
 
+                        # 3. Пытаемся заменить медиа (edit_media позволяет менять типы между собой)
+                        if input_media_for_edit:
+                            try:
+                                newly_sent_message_object = await message_to_update.edit_media(media=input_media_for_edit, reply_markup=reply_markup)
+                                can_edit_media = True
+                            except BadRequest as e:
+                                # Ошибка может возникнуть, если контент идентичен или есть специфичные ограничения
+                                can_edit_media = False 
 
+                # Если редактирование не удалось (или старое было текстом), удаляем и шлем новое
                 if not can_edit_media:
-                    if message_to_update: # Удаляем старое, если не смогли отредактировать
+                    if message_to_update: 
                         try: await context.bot.delete_message(chat_id, message_to_update.message_id)
                         except (BadRequest, TelegramError): pass
                     
-                    # Отправляем новое медиа
-                    caption_to_send = final_base_text_for_display if final_base_text_for_display else None
+                    # Отправляем новое медиа с нуля
                     if media_type == "photo":
-                        newly_sent_message_object = await context.bot.send_photo(chat_id, photo=file_id, caption=caption_to_send, parse_mode=ParseMode.HTML if caption_to_send else None, reply_markup=reply_markup, has_spoiler=spoiler)
+                        newly_sent_message_object = await context.bot.send_photo(chat_id, photo=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, reply_markup=reply_markup, has_spoiler=spoiler)
                     elif media_type == "video":
-                        newly_sent_message_object = await context.bot.send_video(chat_id, video=file_id, caption=caption_to_send, parse_mode=ParseMode.HTML if caption_to_send else None, reply_markup=reply_markup, has_spoiler=spoiler)
+                        newly_sent_message_object = await context.bot.send_video(chat_id, video=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, reply_markup=reply_markup, has_spoiler=spoiler)
                     elif media_type == "animation":
-                        newly_sent_message_object = await context.bot.send_animation(chat_id, animation=file_id, caption=caption_to_send, parse_mode=ParseMode.HTML if caption_to_send else None, reply_markup=reply_markup, has_spoiler=spoiler)
+                        newly_sent_message_object = await context.bot.send_animation(chat_id, animation=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, reply_markup=reply_markup, has_spoiler=spoiler)
                     elif media_type == "audio":
-                        newly_sent_message_object = await context.bot.send_audio(chat_id, audio=file_id, caption=caption_to_send, parse_mode=ParseMode.HTML if caption_to_send else None, reply_markup=reply_markup)
+                        newly_sent_message_object = await context.bot.send_audio(chat_id, audio=file_id, caption=current_caption, parse_mode=ParseMode.HTML if current_caption else None, reply_markup=reply_markup)
                     else:
                         newly_sent_message_object = await context.bot.send_message(chat_id, f"{final_base_text_for_display}\n(Медиа не поддерживается или ошибка)", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             
-            if newly_sent_message_object and newly_sent_message_object.message_id not in final_message_ids_sent : # если это не медиагруппа, где уже добавили
+            if newly_sent_message_object and newly_sent_message_object.message_id not in final_message_ids_sent :
                  final_message_ids_sent.append(newly_sent_message_object.message_id)
 
         elif final_base_text_for_display: # Только текст
             can_edit_text = False
-            if message_to_update and (message_to_update.text is not None or message_to_update.caption is not None): # Можно редактировать если есть текст ИЛИ caption
-                 # Если у message_to_update было медиа, edit_text не сработает. Нужно edit_caption.
-                 # Но если мы здесь, значит media_content пуст, т.е. у старого сообщения не должно быть медиа для edit_text.
-                 # Однако, если старое было медиа, а новое - текст, то старое надо удалить.
-                if message_to_update.text is not None: # Только если старое сообщение текстовое
-                    try:
-                        newly_sent_message_object = await message_to_update.edit_text(final_base_text_for_display, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-                        can_edit_text = True
-                    except BadRequest:
-                        can_edit_text = False
-                # Если can_edit_text все еще False, значит либо старое не текстовое, либо ошибка. Удаляем и шлем новое.
-
+            # Если старое сообщение - медиа, его нельзя превратить в текст через edit (API запрещает).
+            # Поэтому edit_text пробуем ТОЛЬКО если старое сообщение тоже текстовое.
+            if message_to_update and message_to_update.text is not None: 
+                try:
+                    newly_sent_message_object = await message_to_update.edit_text(final_base_text_for_display, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+                    can_edit_text = True
+                except BadRequest:
+                    can_edit_text = False
+            
             if not can_edit_text:
                 if message_to_update:
                     try: await context.bot.delete_message(chat_id, message_to_update.message_id)
@@ -10513,29 +10518,30 @@ async def render_fragment(
             
             if newly_sent_message_object: final_message_ids_sent.append(newly_sent_message_object.message_id)
 
-        elif reply_markup: # Нет текста, нет медиа, но есть кнопки (например, фрагмент только с выбором)
-            placeholder_text = "Выберите действие:" # Или другой подходящий текст
+        elif reply_markup: # Только кнопки
+            placeholder_text = "Выберите действие:"
             if message_to_update: 
                 try: 
-                    # Если у старого сообщения был текст/медиа, лучше удалить и отправить новое только с кнопками
-                    if message_to_update.text or message_to_update.photo or message_to_update.video or message_to_update.animation:
+                    # Если было медиа, удаляем (нельзя превратить медиа в текст)
+                    if message_to_update.photo or message_to_update.video or message_to_update.animation or message_to_update.audio:
                         await message_to_update.delete()
                         newly_sent_message_object = await context.bot.send_message(chat_id, text=placeholder_text, reply_markup=reply_markup)
-                    else: # Если старое сообщение тоже было только с кнопками (или пустое)
-                        newly_sent_message_object = await message_to_update.edit_text(text=placeholder_text, reply_markup=reply_markup) # или edit_reply_markup
+                    else: 
+                        newly_sent_message_object = await message_to_update.edit_text(text=placeholder_text, reply_markup=reply_markup)
                 except (BadRequest, TelegramError): 
-                    try: await message_to_update.delete() # Попытка удалить если редактирование не удалось
+                    try: await message_to_update.delete()
                     except (BadRequest, TelegramError): pass
                     newly_sent_message_object = await context.bot.send_message(chat_id, text=placeholder_text, reply_markup=reply_markup)
             else:
                 newly_sent_message_object = await context.bot.send_message(chat_id, text=placeholder_text, reply_markup=reply_markup)
         
         else: # Пустой фрагмент
+            # Логика остается прежней
             empty_text = "Фрагмент пуст."
             can_edit_empty = False
-            if message_to_update and message_to_update.text is not None: # Только если старое сообщение текстовое
+            if message_to_update and message_to_update.text is not None:
                 try:
-                    newly_sent_message_object = await message_to_update.edit_text(empty_text, reply_markup=reply_markup) # reply_markup может быть None
+                    newly_sent_message_object = await message_to_update.edit_text(empty_text, reply_markup=reply_markup)
                     can_edit_empty = True
                 except BadRequest:
                     can_edit_empty = False
@@ -11620,6 +11626,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
