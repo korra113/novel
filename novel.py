@@ -691,39 +691,71 @@ def load_story_by_id(story_id: str) -> dict | None:
 
 
 
-def save_story_data(user_id_str: str, story_id: str, story_content: dict):
+def _save_story_state_to_firebase_sync(inline_message_id: str, story_state_data: dict):
     """
-    Сохраняет историю по пути:
-        users_story/{user_id_str}/{story_id}
-    И создаёт индекс:
-        stories_index/{story_id} = {owner_id: user_id_str}
-    Для быстрого поиска историй без знания user_id.
+    Внутренняя синхронная функция для выполнения блокирующего I/O.
     """
-    try:
-        if not firebase_admin._DEFAULT_APP_NAME:
-            logger.error("Firebase приложение не инициализировано. Сохранение отменено.")
-            return
+    if not inline_message_id:
+        logger.error("save_story_state_to_firebase: inline_message_id is required.")
+        return
+    
+    ref = db.reference(f'story_settings/{inline_message_id}')
+    
+    # Получаем существующие данные (БЛОКИРУЮЩИЙ ЗАПРОС)
+    existing_data = ref.get() or {}
+    existing_data.update(story_state_data)
+    
+    if 'launch_time' not in existing_data and 'launch_time' not in story_state_data :
+        now_utc = datetime.datetime.utcnow()
+        story_state_data['launch_time'] = {
+            'year': now_utc.year,
+            'day': now_utc.day,
+            'hour': now_utc.hour,
+            'minute': now_utc.minute,
+            'iso_timestamp_utc': now_utc.isoformat()
+        }
+        logger.info(f"Setting initial launch_time for {inline_message_id}")
+    elif 'launch_time' in existing_data and 'launch_time' not in story_state_data:
+        story_state_data['launch_time'] = existing_data['launch_time']
 
-        # --- 1. Сохранение самой истории
-        story_ref = db.reference(f'users_story/{user_id_str}/{story_id}')
+    # Логика конвертации типов (set -> list и т.д.)
+    if 'poll_details' in story_state_data and story_state_data['poll_details']:
+        poll_details = story_state_data['poll_details']
+        if 'votes' in poll_details:
+            votes_data = poll_details['votes']
+            if isinstance(votes_data, dict):
+                story_state_data['poll_details']['votes'] = {
+                    str(idx): list(user_set or [])
+                    for idx, user_set in votes_data.items()
+                }
+            elif isinstance(votes_data, list):
+                story_state_data['poll_details']['votes'] = {
+                    str(i): list(v) if isinstance(v, list) else []
+                    for i, v in enumerate(votes_data)
+                }
+        if 'voted_users' in poll_details and isinstance(poll_details['voted_users'], set):
+            poll_details['voted_users'] = list(poll_details['voted_users'])
 
-        current_data = story_ref.get() or {}
-        current_data.update(story_content)
-        story_ref.set(current_data)
+    logger.info(f"Saving to Firebase for {inline_message_id}: {story_state_data}")
+    
+    # Сохраняем данные (БЛОКИРУЮЩИЙ ЗАПРОС)
+    ref.set(story_state_data)
 
-        # --- 2. Сохранение индекса истории
-        index_ref = db.reference(f'stories_index/{story_id}')
-        index_ref.set({
-            "owner_id": user_id_str,
-            "updated": int(time.time())  # по желанию — можно хранить timestamp
-        })
 
-        logger.info(f"История {story_id} сохранена. Индекс stories_index обновлён → {user_id_str}")
+# 2. Создаем новую асинхронную функцию-обертку
+async def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict):
+    """
+    Асинхронная обертка. Безопасно запускает сохранение в отдельном потоке,
+    не блокируя основной цикл событий бота.
+    """
+    # ВАЖНО: Делаем полную копию данных перед передачей в поток.
+    # Если этого не сделать, и основной бот изменит словарь story_state_data 
+    # во время сохранения, возникнет ошибка или запишутся битые данные.
+    data_copy = copy.deepcopy(story_state_data)
+    
+    # Запускаем синхронную функцию в отдельном потоке
+    await asyncio.to_thread(_save_story_state_to_firebase_sync, inline_message_id, data_copy)
 
-    except firebase_admin.exceptions.FirebaseError as e:
-        logger.error(f"Ошибка Firebase при сохранении истории {story_id}: {e}")
-    except Exception as e:
-        logger.error(f"Неожиданная ошибка при сохранении истории: {e}")
 
 
 def save_current_story_from_context(context: ContextTypes.DEFAULT_TYPE):
@@ -1111,6 +1143,353 @@ async def transfer_to_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка переноса: {e}")
 
+async def training_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает пользователю варианты обучения."""
+    
+    # Если вызвано через кнопку — отвечаем callback'у
+    if update.callback_query:
+        await update.callback_query.answer()
+        target = update.callback_query.message
+    else:
+        target = update.message
+
+    text = (
+        "Выберите вариант обучения:\n\n"
+        "🧩 *Интерактивное обучение*\n"
+        "При нажатии кнопки *Интерактивное обучение* к списку ваших историй "
+        "будет добавлено **7 интерактивных учебных историй** с подсказками и пояснениями.\n\n"
+        "Вы сможете:\n"
+        "• изменять их как угодно\n"
+        "• смотреть результат изменений запуская истории в боте\n"
+        "• удалить их в любой момент из своего списка в главном меню\n"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🧩 Интерактивное обучение", callback_data='interactive_training_start')],    
+        [InlineKeyboardButton("📔 Простое обучение", callback_data='play_000_001_main_1')],
+        [InlineKeyboardButton("📚 Продвинутое обучение", callback_data='play_000_002_main_1')],
+        [InlineKeyboardButton("🌃 В Главное Меню 🌃", callback_data='restart_callback')],
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await target.reply_text(
+        text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+
+import re  # Не забудьте импортировать re для сортировки
+
+async def start_interactive_training(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+
+    # Сообщение "Подождите..."
+    wait_message = await query.message.reply_text("⏳ Подождите, копирую обучающие материалы...")
+
+    data = load_data()
+    users_story = data.get("users_story", {})
+    story_maps = data.get("story_maps", {})
+
+    source_id = "800"
+
+    user_story_target = users_story.get(user_id, {})
+    user_maps_target = story_maps.get(user_id, {})
+
+    # ---------------------------------------------------
+    # Подготовка: Создаем карту существующих заголовков пользователя
+    # { "Название истории": "existing_story_id" }
+    # ---------------------------------------------------
+    existing_titles_map = {}
+    for sid, sdata in user_story_target.items():
+        if isinstance(sdata, dict) and "title" in sdata:
+            existing_titles_map[sdata["title"]] = sid
+
+    # ---------------------------------------------------
+    # Генератор нового story_id (с учетом текущего состояния user_story_target)
+    # ---------------------------------------------------
+    def generate_new_story_id():
+        # Считываем ключи прямо из target, так как он обновляется в цикле
+        existing_ids = [sid for sid in user_story_target.keys() if sid.startswith("int")]
+
+        used = set()
+        for sid in existing_ids:
+            if len(sid) >= 5:
+                # Предполагаем формат intXX...
+                num_part = sid[3:5]
+                if num_part.isdigit():
+                    used.add(int(num_part))
+
+        for i in range(100):
+            if i not in used:
+                free_two_digits = f"{i:02d}"
+                break
+        else:
+            # Если слоты 00-99 заняты, генерируем случайный хвост
+            free_two_digits = "99" 
+        
+        random_part = uuid.uuid4().hex[:5]
+        return f"int{free_two_digits}{random_part}"
+
+    # ---------------------------------------------------
+    # Проверяем, есть ли обучающие материалы
+    # ---------------------------------------------------
+    if source_id not in users_story or source_id not in story_maps:
+        await wait_message.edit_text("❌ Обучающие материалы не найдены.")
+        return
+
+    source_stories = users_story[source_id]
+    source_maps = story_maps[source_id]
+
+    # ---------------------------------------------------
+    # КОПИРОВАНИЕ – ЕДИНЫЙ ЦИКЛ
+    # ---------------------------------------------------
+    for old_sid, story_data in source_stories.items():
+
+        # Убедимся, что исходный ID — типа "800" (или любой другой формат источника)
+        if not (old_sid.isdigit() and len(old_sid) == 3):
+            continue
+        
+        # Получаем заголовок копируемой истории
+        source_title = story_data.get("title")
+
+        # ❗ ПРОВЕРКА: Если такой заголовок уже есть, берем его ID. Иначе - генерируем новый.
+        if source_title and source_title in existing_titles_map:
+            # Старый ID
+            old_existing_sid = existing_titles_map[source_title]
+
+            # ❗ Используем его ТОЛЬКО если он начинается с "int"
+            if old_existing_sid.startswith("int"):
+                new_sid = old_existing_sid
+            else:
+                # Иначе — генерируем новый ID
+                new_sid = generate_new_story_id()
+                existing_titles_map[source_title] = new_sid  # переопределяем ID для этого title
+        else:
+            new_sid = generate_new_story_id()
+            if source_title:
+                existing_titles_map[source_title] = new_sid
+        # --- копируем саму историю (перезапись) ---
+        user_story_target[new_sid] = story_data.copy()
+        # Если у вас есть отдельная функция сохранения - вызываем (она обновит этот ID)
+        save_story_data(user_id, new_sid, story_data)
+
+        # --- копируем карты, принадлежащие этой истории ---
+        for old_map_id, map_content in source_maps.items():
+            # Карты для истории начинаются с old_sid (например: 800_main_1)
+            if old_map_id.startswith(old_sid):
+                # Заменяем префикс источника на целевой ID
+                new_map_id = old_map_id.replace(old_sid, new_sid, 1)
+
+                user_maps_target[new_map_id] = (
+                    map_content.copy() if isinstance(map_content, dict) else map_content
+                )
+
+    # ---------------------------------------------------
+    # Сохраняем результат в БД
+    # ---------------------------------------------------
+    db.reference(f"story_maps/{user_id}").set(user_maps_target)
+    db.reference(f"users_story/{user_id}").set(user_story_target)
+
+    # ---------------------------------------------------
+    # Формируем клавиатуру с СОРТИРОВКОЙ
+    # ---------------------------------------------------
+    keyboard_rows = []
+    button_callback_data = "play_000_001_main_1"
+
+    keyboard_rows.append([
+        InlineKeyboardButton("ℹ Подробнее", callback_data=button_callback_data)
+    ])
+
+    # Выбираем только обучающие истории
+    imported_stories_list = [
+        (sid, sdata) for sid, sdata in user_story_target.items()
+        if sid.startswith("int") and len(sid) >= 8
+    ]
+
+    # --- Функция натуральной сортировки ---
+    # Разбивает строку на текст и числа: "Глава 10" -> ["Глава ", 10]
+    def natural_sort_key(item):
+        title = item[1].get("title", "")
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', title)]
+
+    # Сортируем список
+    imported_stories_list.sort(key=natural_sort_key)
+
+    # Генерируем кнопки
+    for sid, sdata in imported_stories_list:
+        title = sdata.get("title", f"История {sid}")
+        short_title = title[:40] + ("…" if len(title) > 40 else "")
+
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                f"📘 {short_title}",
+                web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id}_{sid}")
+            )
+        ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard_rows)
+
+    # ---------------------------------------------------
+    # Заменяем "Подождите..." итогом
+    # ---------------------------------------------------
+    await wait_message.edit_text(
+        "🎓 *Обучающие материалы скопированы (или обновлены)!*\n\n"
+        "Вы можете открыть любую учебную историю ниже или посмотреть подробное объяснение по кнопке «Подробнее».",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+
+async def transfer_story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    bot = context.bot
+
+    try:
+        target_user_id = "800"
+        user_000_ref = db.reference(f'users_story/{target_user_id}')
+
+        # ======== Если команда вызвана без аргументов → просто показываем список историй ========
+        if not context.args:
+            user_stories = user_000_ref.get() or {}
+
+            if not user_stories:
+                await message.reply_text("📭 У пользователя 000 пока нет историй.")
+                return
+
+            keyboard_rows = []
+            for sid in sorted(user_stories.keys()):
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        f"📘 История {sid}",
+                        web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{sid}")
+                    )
+                ])
+
+            keyboard = InlineKeyboardMarkup(keyboard_rows)
+
+            await message.reply_text(
+                "📚 *Истории пользователя 000:*",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+            return
+
+        # =====================================================
+        # ======== Часть для копирования истории =============
+        # =====================================================
+
+        target_story_id = context.args[0].strip()
+
+        # ======== Поиск исходной истории =========
+
+        source_owner_id = None
+        source_content = None
+
+        index_ref = db.reference(f'stories_index/{target_story_id}')
+        index_data = index_ref.get()
+
+        if index_data and 'owner_id' in index_data:
+            source_owner_id = index_data['owner_id']
+            source_content = db.reference(f'users_story/{source_owner_id}/{target_story_id}').get()
+
+        # Fallback-поиск
+        if not source_content:
+            all_users_ref = db.reference('users_story')
+            all_data = all_users_ref.get()
+
+            if all_data:
+                for uid, stories in all_data.items():
+                    if target_story_id in stories:
+                        source_owner_id = uid
+                        source_content = stories[target_story_id]
+                        break
+
+        if not source_content:
+            await message.reply_text(
+                f"❌ История с ID `{target_story_id}` не найдена.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # ======== Поиск свободного ID у 000 =========
+
+        user_000_shallow = user_000_ref.get(shallow=True)
+        existing_ids = set(user_000_shallow.keys()) if user_000_shallow else set()
+
+        new_story_id = None
+        for i in range(900, 1000):  # <── только диапазон 900–999
+            candidate_id = f"{i}"
+            if candidate_id not in existing_ids:
+                new_story_id = candidate_id
+                break
+
+        if new_story_id is None:
+            await message.reply_text("❌ У пользователя 000 нет свободных ID от 900 до 999.")
+            return
+
+        # ======== Копирование истории =========
+
+        new_content = copy.deepcopy(source_content)
+        new_content["owner_id"] = target_user_id
+
+        save_story_data(target_user_id, new_story_id, new_content)
+        logger.info(f"История {new_story_id} успешно скопирована пользователю 000")
+
+        # ======== Генерация WebApp-кнопок ========
+
+        user_stories_full = user_000_ref.get() or {}
+        sorted_story_ids = sorted(user_stories_full.keys())
+
+        keyboard_rows = [
+            [
+                InlineKeyboardButton(
+                    f"🆕 Новая история {new_story_id}",
+                    web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{new_story_id}")
+                )
+            ]
+        ]
+
+        # Остальные истории
+        for sid in sorted_story_ids:
+            keyboard_rows.append([
+                InlineKeyboardButton(
+                    f"📘 История {sid}",
+                    web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{sid}")
+                )
+            ])
+
+        keyboard = InlineKeyboardMarkup(keyboard_rows)
+
+        # ======== Ответ =========
+
+        response_text = (
+            f"✅ *История скопирована!*\n"
+            f"📂 Исходный ID: `{target_story_id}`\n"
+            f"🆕 Новый ID у user 000: `{new_story_id}`"
+        )
+
+        await message.reply_text(
+            response_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при трансфере истории: {e}", exc_info=True)
+
+        try:
+            await message.reply_text(
+                f"❌ Ошибка при обработке:\n`{e}`",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
 
 
 #===============================================================        
@@ -2401,353 +2780,6 @@ logger = logging.getLogger(__name__)
 
 
 
-async def training_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает пользователю варианты обучения."""
-    
-    # Если вызвано через кнопку — отвечаем callback'у
-    if update.callback_query:
-        await update.callback_query.answer()
-        target = update.callback_query.message
-    else:
-        target = update.message
-
-    text = (
-        "Выберите вариант обучения:\n\n"
-        "🧩 *Интерактивное обучение*\n"
-        "При нажатии кнопки *Интерактивное обучение* к списку ваших историй "
-        "будет добавлено **7 интерактивных учебных историй** с подсказками и пояснениями.\n\n"
-        "Вы сможете:\n"
-        "• изменять их как угодно\n"
-        "• смотреть результат изменений запуская истории в боте\n"
-        "• удалить их в любой момент из своего списка в главном меню\n"
-    )
-
-    keyboard = [
-        [InlineKeyboardButton("🧩 Интерактивное обучение", callback_data='interactive_training_start')],    
-        [InlineKeyboardButton("📔 Простое обучение", callback_data='play_000_001_main_1')],
-        [InlineKeyboardButton("📚 Продвинутое обучение", callback_data='play_000_002_main_1')],
-        [InlineKeyboardButton("🌃 В Главное Меню 🌃", callback_data='restart_callback')],
-    ]
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await target.reply_text(
-        text,
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-
-
-
-import re  # Не забудьте импортировать re для сортировки
-
-async def start_interactive_training(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = str(query.from_user.id)
-
-    # Сообщение "Подождите..."
-    wait_message = await query.message.reply_text("⏳ Подождите, копирую обучающие материалы...")
-
-    data = load_data()
-    users_story = data.get("users_story", {})
-    story_maps = data.get("story_maps", {})
-
-    source_id = "800"
-
-    user_story_target = users_story.get(user_id, {})
-    user_maps_target = story_maps.get(user_id, {})
-
-    # ---------------------------------------------------
-    # Подготовка: Создаем карту существующих заголовков пользователя
-    # { "Название истории": "existing_story_id" }
-    # ---------------------------------------------------
-    existing_titles_map = {}
-    for sid, sdata in user_story_target.items():
-        if isinstance(sdata, dict) and "title" in sdata:
-            existing_titles_map[sdata["title"]] = sid
-
-    # ---------------------------------------------------
-    # Генератор нового story_id (с учетом текущего состояния user_story_target)
-    # ---------------------------------------------------
-    def generate_new_story_id():
-        # Считываем ключи прямо из target, так как он обновляется в цикле
-        existing_ids = [sid for sid in user_story_target.keys() if sid.startswith("int")]
-
-        used = set()
-        for sid in existing_ids:
-            if len(sid) >= 5:
-                # Предполагаем формат intXX...
-                num_part = sid[3:5]
-                if num_part.isdigit():
-                    used.add(int(num_part))
-
-        for i in range(100):
-            if i not in used:
-                free_two_digits = f"{i:02d}"
-                break
-        else:
-            # Если слоты 00-99 заняты, генерируем случайный хвост
-            free_two_digits = "99" 
-        
-        random_part = uuid.uuid4().hex[:5]
-        return f"int{free_two_digits}{random_part}"
-
-    # ---------------------------------------------------
-    # Проверяем, есть ли обучающие материалы
-    # ---------------------------------------------------
-    if source_id not in users_story or source_id not in story_maps:
-        await wait_message.edit_text("❌ Обучающие материалы не найдены.")
-        return
-
-    source_stories = users_story[source_id]
-    source_maps = story_maps[source_id]
-
-    # ---------------------------------------------------
-    # КОПИРОВАНИЕ – ЕДИНЫЙ ЦИКЛ
-    # ---------------------------------------------------
-    for old_sid, story_data in source_stories.items():
-
-        # Убедимся, что исходный ID — типа "800" (или любой другой формат источника)
-        if not (old_sid.isdigit() and len(old_sid) == 3):
-            continue
-        
-        # Получаем заголовок копируемой истории
-        source_title = story_data.get("title")
-
-        # ❗ ПРОВЕРКА: Если такой заголовок уже есть, берем его ID. Иначе - генерируем новый.
-        if source_title and source_title in existing_titles_map:
-            # Старый ID
-            old_existing_sid = existing_titles_map[source_title]
-
-            # ❗ Используем его ТОЛЬКО если он начинается с "int"
-            if old_existing_sid.startswith("int"):
-                new_sid = old_existing_sid
-            else:
-                # Иначе — генерируем новый ID
-                new_sid = generate_new_story_id()
-                existing_titles_map[source_title] = new_sid  # переопределяем ID для этого title
-        else:
-            new_sid = generate_new_story_id()
-            if source_title:
-                existing_titles_map[source_title] = new_sid
-        # --- копируем саму историю (перезапись) ---
-        user_story_target[new_sid] = story_data.copy()
-        # Если у вас есть отдельная функция сохранения - вызываем (она обновит этот ID)
-        save_story_data(user_id, new_sid, story_data)
-
-        # --- копируем карты, принадлежащие этой истории ---
-        for old_map_id, map_content in source_maps.items():
-            # Карты для истории начинаются с old_sid (например: 800_main_1)
-            if old_map_id.startswith(old_sid):
-                # Заменяем префикс источника на целевой ID
-                new_map_id = old_map_id.replace(old_sid, new_sid, 1)
-
-                user_maps_target[new_map_id] = (
-                    map_content.copy() if isinstance(map_content, dict) else map_content
-                )
-
-    # ---------------------------------------------------
-    # Сохраняем результат в БД
-    # ---------------------------------------------------
-    db.reference(f"story_maps/{user_id}").set(user_maps_target)
-    db.reference(f"users_story/{user_id}").set(user_story_target)
-
-    # ---------------------------------------------------
-    # Формируем клавиатуру с СОРТИРОВКОЙ
-    # ---------------------------------------------------
-    keyboard_rows = []
-    button_callback_data = "play_000_001_main_1"
-
-    keyboard_rows.append([
-        InlineKeyboardButton("ℹ Подробнее", callback_data=button_callback_data)
-    ])
-
-    # Выбираем только обучающие истории
-    imported_stories_list = [
-        (sid, sdata) for sid, sdata in user_story_target.items()
-        if sid.startswith("int") and len(sid) >= 8
-    ]
-
-    # --- Функция натуральной сортировки ---
-    # Разбивает строку на текст и числа: "Глава 10" -> ["Глава ", 10]
-    def natural_sort_key(item):
-        title = item[1].get("title", "")
-        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', title)]
-
-    # Сортируем список
-    imported_stories_list.sort(key=natural_sort_key)
-
-    # Генерируем кнопки
-    for sid, sdata in imported_stories_list:
-        title = sdata.get("title", f"История {sid}")
-        short_title = title[:40] + ("…" if len(title) > 40 else "")
-
-        keyboard_rows.append([
-            InlineKeyboardButton(
-                f"📘 {short_title}",
-                web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id}_{sid}")
-            )
-        ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard_rows)
-
-    # ---------------------------------------------------
-    # Заменяем "Подождите..." итогом
-    # ---------------------------------------------------
-    await wait_message.edit_text(
-        "🎓 *Обучающие материалы скопированы (или обновлены)!*\n\n"
-        "Вы можете открыть любую учебную историю ниже или посмотреть подробное объяснение по кнопке «Подробнее».",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
-    )
-
-
-
-async def transfer_story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    bot = context.bot
-
-    try:
-        target_user_id = "800"
-        user_000_ref = db.reference(f'users_story/{target_user_id}')
-
-        # ======== Если команда вызвана без аргументов → просто показываем список историй ========
-        if not context.args:
-            user_stories = user_000_ref.get() or {}
-
-            if not user_stories:
-                await message.reply_text("📭 У пользователя 000 пока нет историй.")
-                return
-
-            keyboard_rows = []
-            for sid in sorted(user_stories.keys()):
-                keyboard_rows.append([
-                    InlineKeyboardButton(
-                        f"📘 История {sid}",
-                        web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{sid}")
-                    )
-                ])
-
-            keyboard = InlineKeyboardMarkup(keyboard_rows)
-
-            await message.reply_text(
-                "📚 *Истории пользователя 000:*",
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-            return
-
-        # =====================================================
-        # ======== Часть для копирования истории =============
-        # =====================================================
-
-        target_story_id = context.args[0].strip()
-
-        # ======== Поиск исходной истории =========
-
-        source_owner_id = None
-        source_content = None
-
-        index_ref = db.reference(f'stories_index/{target_story_id}')
-        index_data = index_ref.get()
-
-        if index_data and 'owner_id' in index_data:
-            source_owner_id = index_data['owner_id']
-            source_content = db.reference(f'users_story/{source_owner_id}/{target_story_id}').get()
-
-        # Fallback-поиск
-        if not source_content:
-            all_users_ref = db.reference('users_story')
-            all_data = all_users_ref.get()
-
-            if all_data:
-                for uid, stories in all_data.items():
-                    if target_story_id in stories:
-                        source_owner_id = uid
-                        source_content = stories[target_story_id]
-                        break
-
-        if not source_content:
-            await message.reply_text(
-                f"❌ История с ID `{target_story_id}` не найдена.",
-                parse_mode="Markdown"
-            )
-            return
-
-        # ======== Поиск свободного ID у 000 =========
-
-        user_000_shallow = user_000_ref.get(shallow=True)
-        existing_ids = set(user_000_shallow.keys()) if user_000_shallow else set()
-
-        new_story_id = None
-        for i in range(900, 1000):  # <── только диапазон 900–999
-            candidate_id = f"{i}"
-            if candidate_id not in existing_ids:
-                new_story_id = candidate_id
-                break
-
-        if new_story_id is None:
-            await message.reply_text("❌ У пользователя 000 нет свободных ID от 900 до 999.")
-            return
-
-        # ======== Копирование истории =========
-
-        new_content = copy.deepcopy(source_content)
-        new_content["owner_id"] = target_user_id
-
-        save_story_data(target_user_id, new_story_id, new_content)
-        logger.info(f"История {new_story_id} успешно скопирована пользователю 000")
-
-        # ======== Генерация WebApp-кнопок ========
-
-        user_stories_full = user_000_ref.get() or {}
-        sorted_story_ids = sorted(user_stories_full.keys())
-
-        keyboard_rows = [
-            [
-                InlineKeyboardButton(
-                    f"🆕 Новая история {new_story_id}",
-                    web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{new_story_id}")
-                )
-            ]
-        ]
-
-        # Остальные истории
-        for sid in sorted_story_ids:
-            keyboard_rows.append([
-                InlineKeyboardButton(
-                    f"📘 История {sid}",
-                    web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{sid}")
-                )
-            ])
-
-        keyboard = InlineKeyboardMarkup(keyboard_rows)
-
-        # ======== Ответ =========
-
-        response_text = (
-            f"✅ *История скопирована!*\n"
-            f"📂 Исходный ID: `{target_story_id}`\n"
-            f"🆕 Новый ID у user 000: `{new_story_id}`"
-        )
-
-        await message.reply_text(
-            response_text,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-
-    except Exception as e:
-        logger.error(f"Ошибка при трансфере истории: {e}", exc_info=True)
-
-        try:
-            await message.reply_text(
-                f"❌ Ошибка при обработке:\n`{e}`",
-                parse_mode="Markdown"
-            )
-        except:
-            pass
 
 
 
@@ -11597,6 +11629,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
