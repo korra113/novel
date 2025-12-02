@@ -79,7 +79,10 @@ from google.genai.types import (
 from telegram.helpers import escape_markdown
 from telegram.constants import ParseMode
 
-GOOGLE_API_KEY = "AIzaSyA56x-9b-w3p-MNIi2eq5Q9rq53tz9o0bE"
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+if not GOOGLE_API_KEY:
+    raise ValueError("Не задан GOOGLE_API_KEY в переменных окружения!")
 
 client = genai.Client(api_key=GOOGLE_API_KEY)
 # Настройка логирования для отладки
