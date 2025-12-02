@@ -1114,7 +1114,7 @@ async def transfer_to_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 #===============================================================        
-
+STORY_LOCKS = defaultdict(asyncio.Lock)
 
 import logging
 import datetime # Для времени запуска
@@ -1180,9 +1180,9 @@ async def process_choice_effects_to_user_attributes(
         try:
             val_for_calc = int(current_value)
         except (ValueError, TypeError):
-            logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_value}', принимаем 0.")
+            logger.info(f"Стат {stat_name} имеет нечисловое значение '{current_value}', принимаем 0.")
             val_for_calc = 0
-
+        logger.info(f"Стат {current_value} сравнивается с------------------------------------------------------------- '{val_for_calc}'")
         if action_type == "check":
             check_passed = (
                 (op_char == '>' and val_for_calc > numeric_val) or
@@ -1190,16 +1190,11 @@ async def process_choice_effects_to_user_attributes(
                 (op_char == '=' and val_for_calc == numeric_val)
             )
             if not check_passed:
-                if hide_effect:
-                    return False, "", True
-                else:
-                    reason = f"Требование: {original_stat_name} {op_char}{final_numeric_val} (тек: {val_for_check})"
-                    temp_effects_data[stat_name] = final_numeric_val
-                    user_progress["current_effects"] = temp_effects_data
-                    save_user_story_progress(story_id, user_id, user_progress)                     
-                    if len(reason) > MAX_ALERT_LENGTH: reason = reason[:MAX_ALERT_LENGTH-3]+"..."
-                    await query.answer(text=reason, show_alert=True)
-                    return False, "", False
+                reason = f"Проверка не пройдена: {stat_name} {op_char}{numeric_val} (у вас: {val_for_calc})"
+                if len(reason) > 200:
+                    reason = reason[:197] + "..."
+                failure_reasons.append(reason)
+                break  # Цепочка прерывается
 
         elif action_type == "set":
             temp_user_attr[stat_name] = numeric_val
@@ -1223,12 +1218,11 @@ async def process_choice_effects_to_user_attributes(
 
     # Сохраняем изменения
     story_state["user_attributes"] = temp_user_attr
-    save_story_state_to_firebase(inline_message_id, story_state)
+    await save_story_state_to_firebase(inline_message_id, story_state)
     if context and inline_message_id:
         context.bot_data.setdefault(inline_message_id, {})["user_attributes"] = temp_user_attr
 
     return True, final_alert_text.strip(), False, story_state
-
 
 def clean_caption(text: str) -> str:
     """Удаляет конструкции вида ((+2)) и [[-4]] из текста."""
@@ -1328,6 +1322,7 @@ def advanced_replace_attributes(text: str, group_attributes: dict) -> str:
         return "Нет текста для отображения — условия не выполнены."
 
     return text
+
 
 def deserialize_votes_from_db(votes_data) -> dict:
     """
@@ -1553,7 +1548,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
                 user_stat_val = user_attributes.get(stat_name)
                 try: user_stat_num = int(user_stat_val)
                 except (ValueError, TypeError): user_stat_num = 0
-
+                logger.info(f"Стат {user_stat_num} сравнивается с-===============--------- '{num_req}'")
                 check_passed = False
                 if user_stat_num is not None:
                     if op == '>': check_passed = user_stat_num > num_req
@@ -1598,7 +1593,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             },
         }
         logger.info(f"{firebase_save_data} ===== Сохранение состояния (с данными голосования) в Firebase.")
-        save_story_state_to_firebase(inline_message_id, firebase_save_data)
+        await save_story_state_to_firebase(inline_message_id, firebase_save_data)
     
     else: # Нет вариантов выбора (финальный фрагмент или переход)
         caption += "\n\n(История завершена)"
@@ -1614,7 +1609,32 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             
             if update_required:
                 logger.info(f"{log_prefix} Обновление финального состояния в Firebase.")
-                save_story_state_to_firebase(inline_message_id, story_state_from_firebase)
+                await save_story_state_to_firebase(inline_message_id, story_state_from_firebase)
+
+
+    # --- NEW: Определяем, изменился ли текст ---
+    msg_cache = context.bot_data.setdefault("message_cache", {})
+    prev_caption = msg_cache.get(inline_message_id)
+
+    media_id = media[0].get("file_id") if (media and len(media) == 1) else None
+    prev_media_id = msg_cache.get(f"{inline_message_id}_media")
+
+    caption_changed = (caption != prev_caption)
+    media_changed = (media_id != prev_media_id)
+
+    caption_or_media_changed = caption_changed or media_changed
+
+    # Если текст не поменялся, а поменялась только клавиатура → обновляем только reply_markup
+    if not caption_or_media_changed:
+        try:
+            await context.bot.edit_message_reply_markup(
+                inline_message_id=inline_message_id,
+                reply_markup=reply_markup
+            )
+            logger.info(f"{log_prefix} Обновлена только клавиатура (счётчики голосов).")
+            return
+        except Exception as e:
+            logger.error(f"{log_prefix} Ошибка при edit_message_reply_markup: {e}")
 
     # 5. Отправка (редактирование) сообщения пользователю
     try:
@@ -1632,10 +1652,13 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
             
             if input_media:
                 await context.bot.edit_message_media(inline_message_id=inline_message_id, media=input_media, reply_markup=reply_markup)
-                return
+                msg_cache[inline_message_id] = caption
+                msg_cache[f"{inline_message_id}_media"] = media_id
+                return                
         
         await context.bot.edit_message_text(inline_message_id=inline_message_id, text=caption, reply_markup=reply_markup, parse_mode='HTML')
-
+        msg_cache[inline_message_id] = caption
+        msg_cache[f"{inline_message_id}_media"] = media_id
     except Exception as e:
         logger.error(f"{log_prefix} КРИТИЧЕСКАЯ ОШИБКА при обновлении сообщения: {e}")
 
@@ -1749,7 +1772,7 @@ async def handle_set_vote_threshold(update: Update, context: CallbackContext):
             "required_votes_to_win": chosen_threshold,
         }
 
-        save_story_state_to_firebase(query.inline_message_id, story_initial_state)
+        await save_story_state_to_firebase(query.inline_message_id, story_initial_state)
         logger.info(f"✅ Порог установлен и сохранён: {chosen_threshold} голосов | История: {story_id}, Фрагмент: {initial_fragment_id}")
 
         # Обновляем bot_data для следующего этапа
@@ -1835,7 +1858,7 @@ async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str,
         try:
             if story_state:
                 story_state.pop("poll_details", None)
-                save_story_state_to_firebase(inline_message_id, story_state)
+                await save_story_state_to_firebase(inline_message_id, story_state)
 
             delay_seconds = 10
             winner_message_text += f"\n\n<i>Продолжение через {delay_seconds} секунд...</i>"
@@ -1863,7 +1886,7 @@ async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str,
     if story_state:
         story_state.pop("poll_details", None)
         story_state["current_fragment_id"] = next_fragment_id_to_display
-        save_story_state_to_firebase(inline_message_id, story_state)
+        await save_story_state_to_firebase(inline_message_id, story_state)
         logger.info(f"[{inline_message_id}] Состояние обновлено и сохранено")
 
     try:
@@ -1896,170 +1919,199 @@ async def end_poll_and_proceed(context: CallbackContext, inline_message_id: str,
             logger.info(f"[{inline_message_id}] Очистка настроек истории завершена")
         except Exception as e:
             logger.info(f"[{inline_message_id}] ❌ Ошибка при завершении истории: {e}")
+        
+        # --- NEW: Очистка лока после полного завершения истории ---
+        if inline_message_id in STORY_LOCKS:
+            del STORY_LOCKS[inline_message_id]
+
+
+
 
 async def handle_poll_vote(update: Update, context: CallbackContext):
     query = update.callback_query
     if not query or not query.data or not query.inline_message_id:
         return
 
-    try:
-        parts = query.data.rsplit("_", 1)
-        if len(parts) != 2:
-            await query.answer("Ошибка формата.", show_alert=True)
-            logger.info("Прервано: некорректный формат callback_data.")
-            return
+    # --- NEW: Получаем ID сообщения заранее для блокировки ---
+    # Нам нужно вытащить inline_message_id, чтобы взять правильный замок
+    current_inline_msg_id = query.inline_message_id
+    
+    # Получаем лок для ЭТОГО КОНКРЕТНОГО сообщения
+    lock = STORY_LOCKS[current_inline_msg_id]
 
-        callback_prefix_and_msg_id = parts[0]
-        choice_idx_str = parts[1]
-
-        vote_parts = callback_prefix_and_msg_id.split("_", 1)
-        if len(vote_parts) != 2 or vote_parts[0] != "vote":
-            await query.answer("Ошибка формата callback (prefix).", show_alert=True)
-            logger.info("Прервано: неверный префикс callback_data.")
-            return
-
-        inline_msg_id_from_cb = vote_parts[1]
-        if inline_msg_id_from_cb != query.inline_message_id:
-            await query.answer("Ошибка идентификатора.", show_alert=True)
-            logger.info(f"Прервано: inline_message_id не совпадает. Из callback: {inline_msg_id_from_cb}, из запроса: {query.inline_message_id}")
-            return
-
-        choice_idx = int(choice_idx_str)
-        user_id = query.from_user.id
-
-        poll_data = context.bot_data.get(query.inline_message_id)
-
-        if not poll_data or poll_data.get("type") != "poll":
-            logger.info(f"Данные голосования для {query.inline_message_id} не найдены в памяти. Загружаем из Firebase.")
-            story_state_from_firebase = load_story_state_from_firebase(query.inline_message_id)
-
-            if not story_state_from_firebase or "poll_details" not in story_state_from_firebase:
-                await query.answer("Голосование не найдено, завершено или неактуально.", show_alert=True)
-                logger.info(f"Firebase: голосование {query.inline_message_id} не найдено или завершено.")
+    # --- NEW: Входим в режим блокировки ---
+    # Пока один пользователь голосует, остальные ждут на этой строчке
+    async with lock:
+        try:
+            parts = query.data.rsplit("_", 1)
+            if len(parts) != 2:
+                await query.answer("Ошибка формата.", show_alert=True)
+                logger.info("Прервано: некорректный формат callback_data.")
                 return
 
-            current_fragment_id_fb = story_state_from_firebase.get("current_fragment_id")
-            poll_details_fb = story_state_from_firebase["poll_details"]
+            callback_prefix_and_msg_id = parts[0]
+            choice_idx_str = parts[1]
 
-            votes_raw = poll_details_fb.get("votes")
-            votes_dict = deserialize_votes_from_db(votes_raw)
-
-            all_voted_in_votes = set(uid for vote_list in votes_dict.values() for uid in vote_list)
-            voted_users_list = poll_details_fb.get("voted_users", [])
-            cleaned_voted_users = [uid for uid in voted_users_list if uid in all_voted_in_votes]
-
-            rehydrated_poll_data = {
-                "type": "poll",
-                "target_user_id": story_state_from_firebase["target_user_id"],
-                "story_id": story_state_from_firebase["story_id"],
-                "current_fragment_id": current_fragment_id_fb,
-                "choices_data": poll_details_fb.get("choices_data", []),
-                "votes": votes_dict,
-                "voted_users": set(cleaned_voted_users),
-                "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
-                "user_attributes": story_state_from_firebase.get("user_attributes", {}),
-            }
-
-            if poll_data and current_fragment_id_fb != poll_data.get("current_fragment_id"):
-                await query.answer("Голосование не найдено, завершено или неактуально.", show_alert=True)
-                logger.info("Прервано: fragment_id из Firebase не совпадает с текущим.")
+            vote_parts = callback_prefix_and_msg_id.split("_", 1)
+            if len(vote_parts) != 2 or vote_parts[0] != "vote":
+                await query.answer("Ошибка формата callback (prefix).", show_alert=True)
+                logger.info("Прервано: неверный префикс callback_data.")
                 return
 
-            context.bot_data[query.inline_message_id] = rehydrated_poll_data
-            poll_data = rehydrated_poll_data
-            logger.info(f"Голосование восстановлено из Firebase: {query.inline_message_id}")
+            inline_msg_id_from_cb = vote_parts[1]
+            if inline_msg_id_from_cb != query.inline_message_id:
+                await query.answer("Ошибка идентификатора.", show_alert=True)
+                logger.info(f"Прервано: inline_message_id не совпадает. Из callback: {inline_msg_id_from_cb}, из запроса: {query.inline_message_id}")
+                return
 
-        votes_dict = poll_data.get("votes", {})
-        voted_users_set = poll_data.get("voted_users", set())
-        all_voted_in_votes = set(uid for vote_list in votes_dict.values() for uid in vote_list)
-        cleaned_voted_users = voted_users_set.intersection(all_voted_in_votes)
-        poll_data["voted_users"] = cleaned_voted_users
+            choice_idx = int(choice_idx_str)
+            user_id = query.from_user.id
 
-        if not poll_data or poll_data.get("type") != "poll":
-            await query.answer("Голосование не найдено или завершено.", show_alert=True)
-            logger.info("Прервано: poll_data отсутствует или некорректно.")
-            return
+            poll_data = context.bot_data.get(query.inline_message_id)
 
-        if user_id in poll_data["voted_users"]:
-            await query.answer("Вы уже голосовали.", show_alert=True)
-            logger.info(f"Пользователь {user_id} уже голосовал.")
-            return
+            # --- ВАЖНО: Внутри блока lock мы работаем как обычно, 
+            # но теперь мы уверены, что никто другой не меняет context.bot_data параллельно ---
 
-        if choice_idx < 0 or choice_idx >= len(poll_data["choices_data"]):
-            await query.answer("Некорректный вариант выбора.", show_alert=True)
-            logger.info(f"Некорректный индекс выбора: {choice_idx}")
-            return
+            if not poll_data or poll_data.get("type") != "poll":
+                logger.info(f"Данные голосования для {query.inline_message_id} не найдены в памяти. Загружаем из Firebase.")
+                story_state_from_firebase = load_story_state_from_firebase(query.inline_message_id)
 
-        votes = poll_data.get("votes")
-        if not isinstance(votes, dict):
-            if isinstance(votes, list):
-                votes = {
-                    idx: set(user_ids if isinstance(user_ids, list) else [user_ids])
-                    for idx, user_ids in enumerate(votes)
+                if not story_state_from_firebase or "poll_details" not in story_state_from_firebase:
+                    await query.answer("Голосование не найдено, завершено или неактуально.", show_alert=True)
+                    logger.info(f"Firebase: голосование {query.inline_message_id} не найдено или завершено.")
+                    return
+
+                current_fragment_id_fb = story_state_from_firebase.get("current_fragment_id")
+                poll_details_fb = story_state_from_firebase["poll_details"]
+
+                votes_raw = poll_details_fb.get("votes")
+                votes_dict = deserialize_votes_from_db(votes_raw)
+
+                all_voted_in_votes = set(uid for vote_list in votes_dict.values() for uid in vote_list)
+                voted_users_list = poll_details_fb.get("voted_users", [])
+                cleaned_voted_users = [uid for uid in voted_users_list if uid in all_voted_in_votes]
+
+                rehydrated_poll_data = {
+                    "type": "poll",
+                    "target_user_id": story_state_from_firebase["target_user_id"],
+                    "story_id": story_state_from_firebase["story_id"],
+                    "current_fragment_id": current_fragment_id_fb,
+                    "choices_data": poll_details_fb.get("choices_data", []),
+                    "votes": votes_dict,
+                    "voted_users": set(cleaned_voted_users),
+                    "required_votes_to_win": story_state_from_firebase["required_votes_to_win"],
+                    "user_attributes": story_state_from_firebase.get("user_attributes", {}),
                 }
+
+                # Дополнительная проверка на случай рассинхрона
+                if poll_data and current_fragment_id_fb != poll_data.get("current_fragment_id"):
+                    await query.answer("Голосование не найдено, завершено или неактуально.", show_alert=True)
+                    logger.info("Прервано: fragment_id из Firebase не совпадает с текущим.")
+                    return
+
+                context.bot_data[query.inline_message_id] = rehydrated_poll_data
+                poll_data = rehydrated_poll_data
+                logger.info(f"Голосование восстановлено из Firebase: {query.inline_message_id}")
+
+            # Синхронизация данных
+            votes_dict = poll_data.get("votes", {})
+            voted_users_set = poll_data.get("voted_users", set())
+            all_voted_in_votes = set(uid for vote_list in votes_dict.values() for uid in vote_list)
+            cleaned_voted_users = voted_users_set.intersection(all_voted_in_votes)
+            poll_data["voted_users"] = cleaned_voted_users
+
+            if not poll_data or poll_data.get("type") != "poll":
+                await query.answer("Голосование не найдено или завершено.", show_alert=True)
+                logger.info("Прервано: poll_data отсутствует или некорректно.")
+                return
+
+            # Проверка голоса - теперь она 100% надежна благодаря lock
+            if user_id in poll_data["voted_users"]:
+                await query.answer("Вы уже голосовали.", show_alert=True)
+                logger.info(f"Пользователь {user_id} уже голосовал.")
+                return
+
+            if choice_idx < 0 or choice_idx >= len(poll_data["choices_data"]):
+                await query.answer("Некорректный вариант выбора.", show_alert=True)
+                logger.info(f"Некорректный индекс выбора: {choice_idx}")
+                return
+
+            # Нормализация структуры голосов
+            votes = poll_data.get("votes")
+            if not isinstance(votes, dict):
+                if isinstance(votes, list):
+                    votes = {
+                        idx: set(user_ids if isinstance(user_ids, list) else [user_ids])
+                        for idx, user_ids in enumerate(votes)
+                    }
+                else:
+                    votes = {}
             else:
-                votes = {}
-        else:
-            votes = {
-                idx: set(user_ids if isinstance(user_ids, (list, set)) else [user_ids])
-                for idx, user_ids in votes.items()
+                votes = {
+                    idx: set(user_ids if isinstance(user_ids, (list, set)) else [user_ids])
+                    for idx, user_ids in votes.items()
+                }
+
+            poll_data["votes"] = votes
+            poll_data["votes"].setdefault(choice_idx, set()).add(user_id)
+
+            if not isinstance(poll_data.get("voted_users"), set):
+                poll_data["voted_users"] = set(poll_data.get("voted_users", []))
+            poll_data["voted_users"].add(user_id)
+
+            # Сохранение в Firebase
+            firebase_save_data = {
+                "story_id": poll_data["story_id"],
+                "target_user_id": poll_data["target_user_id"],
+                "current_fragment_id": poll_data["current_fragment_id"],
+                "required_votes_to_win": poll_data["required_votes_to_win"],
+                "poll_details": {
+                    "choices_data": poll_data["choices_data"],
+                    "votes": poll_data["votes"],
+                    "voted_users": poll_data["voted_users"]
+                },
+                "user_attributes": poll_data["user_attributes"],
             }
 
-        poll_data["votes"] = votes
-        poll_data["votes"].setdefault(choice_idx, set()).add(user_id)
+            await save_story_state_to_firebase(query.inline_message_id, firebase_save_data)
+            logger.info(f"Голос принят: {query.inline_message_id}, выбор {choice_idx}, пользователь {user_id}")
 
-        if not isinstance(poll_data.get("voted_users"), set):
-            poll_data["voted_users"] = set(poll_data.get("voted_users", []))
-        poll_data["voted_users"].add(user_id)
+            required_votes_to_win = poll_data["required_votes_to_win"]
+            num_votes_for_current_choice = len(poll_data["votes"][choice_idx])
 
-        firebase_save_data = {
-            "story_id": poll_data["story_id"],
-            "target_user_id": poll_data["target_user_id"],
-            "current_fragment_id": poll_data["current_fragment_id"],
-            "required_votes_to_win": poll_data["required_votes_to_win"],
-            "poll_details": {
-                "choices_data": poll_data["choices_data"],
-                "votes": poll_data["votes"],
-                "voted_users": poll_data["voted_users"]
-            },
-            "user_attributes": poll_data["user_attributes"],
-        }
+            # Проверка победы
+            if num_votes_for_current_choice >= required_votes_to_win:
+                if required_votes_to_win > 1:
+                    await query.answer(f"Голос принят! Вариант набрал {required_votes_to_win} голосов!", show_alert=False)
+                else:
+                    await query.answer()
+                
+                logger.info(f"Голосование завершено: {query.inline_message_id}, выбор {choice_idx}")
+                # Вызываем переход. Так как мы внутри "async with lock", 
+                # никто не сможет кликнуть еще раз, пока не завершится переход.
+                await end_poll_and_proceed(context, query.inline_message_id, choice_idx, poll_data)
+                return
 
-        save_story_state_to_firebase(query.inline_message_id, firebase_save_data)
-        logger.info(f"Голос принят: {query.inline_message_id}, выбор {choice_idx}, пользователь {user_id}")
+            await query.answer("Ваш голос принят!")
+            # Обновляем отображение (клавиатуру с цифрами)
+            await display_fragment_for_interaction(
+                context,
+                inline_message_id=query.inline_message_id,
+                target_user_id_str=poll_data["target_user_id"],
+                story_id=poll_data["story_id"],
+                fragment_id=poll_data["current_fragment_id"]
+            )
 
-        required_votes_to_win = poll_data["required_votes_to_win"]
-        num_votes_for_current_choice = len(poll_data["votes"][choice_idx])
-
-        if num_votes_for_current_choice >= required_votes_to_win:
-            if required_votes_to_win > 1:
-                await query.answer(f"Голос принят! Вариант набрал {required_votes_to_win} голосов!", show_alert=False)
-            else:
-                await query.answer()  # Просто "поглощает" клик без всплывающего сообщения
-            logger.info(f"Голосование завершено: {query.inline_message_id}, выбор {choice_idx}")
-            await end_poll_and_proceed(context, query.inline_message_id, choice_idx, poll_data)
-            return
-
-
-        await query.answer("Ваш голос принят!")
-        await display_fragment_for_interaction(
-            context,
-            inline_message_id=query.inline_message_id,
-            target_user_id_str=poll_data["target_user_id"],
-            story_id=poll_data["story_id"],
-            fragment_id=poll_data["current_fragment_id"]
-        )
-
-    except ValueError:
-        await query.answer("Неверный выбор (ошибка значения).", show_alert=True)
-        logger.info(f"Ошибка преобразования choice_idx: {query.data}")
-    except Exception as e:
-        logger.info(f"Ошибка в handle_poll_vote: {e}")
-        if query and hasattr(query, 'answer') and not query.answered:
-            try:
-                await query.answer("Ошибка при голосовании.")
-            except Exception:
-                pass
+        except ValueError:
+            await query.answer("Неверный выбор (ошибка значения).", show_alert=True)
+            logger.info(f"Ошибка преобразования choice_idx: {query.data}")
+        except Exception as e:
+            logger.info(f"Ошибка в handle_poll_vote: {e}")
+            if query and hasattr(query, 'answer') and not query.answered:
+                try:
+                    await query.answer("Ошибка при голосовании.")
+                except Exception:
+                    pass
 
 def is_possible_story_id(text: str) -> bool:
     return bool(re.fullmatch(r'[0-9a-f]{10}', text.lower()))
@@ -2130,8 +2182,7 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if len(results) >= 49:
             break
 
-    await update.inline_query.answer(results, cache_time=15)
-
+    await update.inline_query.answer(results, cache_time=10)
 
 
 
@@ -2360,18 +2411,343 @@ async def training_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         target = update.message
 
+    text = (
+        "Выберите вариант обучения:\n\n"
+        "🧩 *Интерактивное обучение*\n"
+        "При нажатии кнопки *Интерактивное обучение* к списку ваших историй "
+        "будет добавлено **7 интерактивных учебных историй** с подсказками и пояснениями.\n\n"
+        "Вы сможете:\n"
+        "• изменять их как угодно\n"
+        "• смотреть результат изменений запуская истории в боте\n"
+        "• удалить их в любой момент из своего списка в главном меню\n"
+    )
+
     keyboard = [
-        [InlineKeyboardButton("📔Простое обучение", callback_data='play_000_001_main_1')],
-        [InlineKeyboardButton("📚Продвинутое обучение", callback_data='play_000_002_main_1')],
-        [InlineKeyboardButton("🌃В Главное Меню🌃", callback_data='restart_callback')],
+        [InlineKeyboardButton("🧩 Интерактивное обучение", callback_data='interactive_training_start')],    
+        [InlineKeyboardButton("📔 Простое обучение", callback_data='play_000_001_main_1')],
+        [InlineKeyboardButton("📚 Продвинутое обучение", callback_data='play_000_002_main_1')],
+        [InlineKeyboardButton("🌃 В Главное Меню 🌃", callback_data='restart_callback')],
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await target.reply_text(
-        "Выберите вариант обучения:",
-        reply_markup=reply_markup
+        text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
+
+
+
+import re  # Не забудьте импортировать re для сортировки
+
+async def start_interactive_training(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+
+    # Сообщение "Подождите..."
+    wait_message = await query.message.reply_text("⏳ Подождите, копирую обучающие материалы...")
+
+    data = load_data()
+    users_story = data.get("users_story", {})
+    story_maps = data.get("story_maps", {})
+
+    source_id = "800"
+
+    user_story_target = users_story.get(user_id, {})
+    user_maps_target = story_maps.get(user_id, {})
+
+    # ---------------------------------------------------
+    # Подготовка: Создаем карту существующих заголовков пользователя
+    # { "Название истории": "existing_story_id" }
+    # ---------------------------------------------------
+    existing_titles_map = {}
+    for sid, sdata in user_story_target.items():
+        if isinstance(sdata, dict) and "title" in sdata:
+            existing_titles_map[sdata["title"]] = sid
+
+    # ---------------------------------------------------
+    # Генератор нового story_id (с учетом текущего состояния user_story_target)
+    # ---------------------------------------------------
+    def generate_new_story_id():
+        # Считываем ключи прямо из target, так как он обновляется в цикле
+        existing_ids = [sid for sid in user_story_target.keys() if sid.startswith("int")]
+
+        used = set()
+        for sid in existing_ids:
+            if len(sid) >= 5:
+                # Предполагаем формат intXX...
+                num_part = sid[3:5]
+                if num_part.isdigit():
+                    used.add(int(num_part))
+
+        for i in range(100):
+            if i not in used:
+                free_two_digits = f"{i:02d}"
+                break
+        else:
+            # Если слоты 00-99 заняты, генерируем случайный хвост
+            free_two_digits = "99" 
+        
+        random_part = uuid.uuid4().hex[:5]
+        return f"int{free_two_digits}{random_part}"
+
+    # ---------------------------------------------------
+    # Проверяем, есть ли обучающие материалы
+    # ---------------------------------------------------
+    if source_id not in users_story or source_id not in story_maps:
+        await wait_message.edit_text("❌ Обучающие материалы не найдены.")
+        return
+
+    source_stories = users_story[source_id]
+    source_maps = story_maps[source_id]
+
+    # ---------------------------------------------------
+    # КОПИРОВАНИЕ – ЕДИНЫЙ ЦИКЛ
+    # ---------------------------------------------------
+    for old_sid, story_data in source_stories.items():
+
+        # Убедимся, что исходный ID — типа "800" (или любой другой формат источника)
+        if not (old_sid.isdigit() and len(old_sid) == 3):
+            continue
+        
+        # Получаем заголовок копируемой истории
+        source_title = story_data.get("title")
+
+        # ❗ ПРОВЕРКА: Если такой заголовок уже есть, берем его ID. Иначе - генерируем новый.
+        if source_title and source_title in existing_titles_map:
+            # Старый ID
+            old_existing_sid = existing_titles_map[source_title]
+
+            # ❗ Используем его ТОЛЬКО если он начинается с "int"
+            if old_existing_sid.startswith("int"):
+                new_sid = old_existing_sid
+            else:
+                # Иначе — генерируем новый ID
+                new_sid = generate_new_story_id()
+                existing_titles_map[source_title] = new_sid  # переопределяем ID для этого title
+        else:
+            new_sid = generate_new_story_id()
+            if source_title:
+                existing_titles_map[source_title] = new_sid
+        # --- копируем саму историю (перезапись) ---
+        user_story_target[new_sid] = story_data.copy()
+        # Если у вас есть отдельная функция сохранения - вызываем (она обновит этот ID)
+        save_story_data(user_id, new_sid, story_data)
+
+        # --- копируем карты, принадлежащие этой истории ---
+        for old_map_id, map_content in source_maps.items():
+            # Карты для истории начинаются с old_sid (например: 800_main_1)
+            if old_map_id.startswith(old_sid):
+                # Заменяем префикс источника на целевой ID
+                new_map_id = old_map_id.replace(old_sid, new_sid, 1)
+
+                user_maps_target[new_map_id] = (
+                    map_content.copy() if isinstance(map_content, dict) else map_content
+                )
+
+    # ---------------------------------------------------
+    # Сохраняем результат в БД
+    # ---------------------------------------------------
+    db.reference(f"story_maps/{user_id}").set(user_maps_target)
+    db.reference(f"users_story/{user_id}").set(user_story_target)
+
+    # ---------------------------------------------------
+    # Формируем клавиатуру с СОРТИРОВКОЙ
+    # ---------------------------------------------------
+    keyboard_rows = []
+    button_callback_data = "play_000_001_main_1"
+
+    keyboard_rows.append([
+        InlineKeyboardButton("ℹ Подробнее", callback_data=button_callback_data)
+    ])
+
+    # Выбираем только обучающие истории
+    imported_stories_list = [
+        (sid, sdata) for sid, sdata in user_story_target.items()
+        if sid.startswith("int") and len(sid) >= 8
+    ]
+
+    # --- Функция натуральной сортировки ---
+    # Разбивает строку на текст и числа: "Глава 10" -> ["Глава ", 10]
+    def natural_sort_key(item):
+        title = item[1].get("title", "")
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', title)]
+
+    # Сортируем список
+    imported_stories_list.sort(key=natural_sort_key)
+
+    # Генерируем кнопки
+    for sid, sdata in imported_stories_list:
+        title = sdata.get("title", f"История {sid}")
+        short_title = title[:40] + ("…" if len(title) > 40 else "")
+
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                f"📘 {short_title}",
+                web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id}_{sid}")
+            )
+        ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard_rows)
+
+    # ---------------------------------------------------
+    # Заменяем "Подождите..." итогом
+    # ---------------------------------------------------
+    await wait_message.edit_text(
+        "🎓 *Обучающие материалы скопированы (или обновлены)!*\n\n"
+        "Вы можете открыть любую учебную историю ниже или посмотреть подробное объяснение по кнопке «Подробнее».",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
+
+
+
+async def transfer_story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    bot = context.bot
+
+    try:
+        target_user_id = "800"
+        user_000_ref = db.reference(f'users_story/{target_user_id}')
+
+        # ======== Если команда вызвана без аргументов → просто показываем список историй ========
+        if not context.args:
+            user_stories = user_000_ref.get() or {}
+
+            if not user_stories:
+                await message.reply_text("📭 У пользователя 000 пока нет историй.")
+                return
+
+            keyboard_rows = []
+            for sid in sorted(user_stories.keys()):
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        f"📘 История {sid}",
+                        web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{sid}")
+                    )
+                ])
+
+            keyboard = InlineKeyboardMarkup(keyboard_rows)
+
+            await message.reply_text(
+                "📚 *Истории пользователя 000:*",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+            return
+
+        # =====================================================
+        # ======== Часть для копирования истории =============
+        # =====================================================
+
+        target_story_id = context.args[0].strip()
+
+        # ======== Поиск исходной истории =========
+
+        source_owner_id = None
+        source_content = None
+
+        index_ref = db.reference(f'stories_index/{target_story_id}')
+        index_data = index_ref.get()
+
+        if index_data and 'owner_id' in index_data:
+            source_owner_id = index_data['owner_id']
+            source_content = db.reference(f'users_story/{source_owner_id}/{target_story_id}').get()
+
+        # Fallback-поиск
+        if not source_content:
+            all_users_ref = db.reference('users_story')
+            all_data = all_users_ref.get()
+
+            if all_data:
+                for uid, stories in all_data.items():
+                    if target_story_id in stories:
+                        source_owner_id = uid
+                        source_content = stories[target_story_id]
+                        break
+
+        if not source_content:
+            await message.reply_text(
+                f"❌ История с ID `{target_story_id}` не найдена.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # ======== Поиск свободного ID у 000 =========
+
+        user_000_shallow = user_000_ref.get(shallow=True)
+        existing_ids = set(user_000_shallow.keys()) if user_000_shallow else set()
+
+        new_story_id = None
+        for i in range(900, 1000):  # <── только диапазон 900–999
+            candidate_id = f"{i}"
+            if candidate_id not in existing_ids:
+                new_story_id = candidate_id
+                break
+
+        if new_story_id is None:
+            await message.reply_text("❌ У пользователя 000 нет свободных ID от 900 до 999.")
+            return
+
+        # ======== Копирование истории =========
+
+        new_content = copy.deepcopy(source_content)
+        new_content["owner_id"] = target_user_id
+
+        save_story_data(target_user_id, new_story_id, new_content)
+        logger.info(f"История {new_story_id} успешно скопирована пользователю 000")
+
+        # ======== Генерация WebApp-кнопок ========
+
+        user_stories_full = user_000_ref.get() or {}
+        sorted_story_ids = sorted(user_stories_full.keys())
+
+        keyboard_rows = [
+            [
+                InlineKeyboardButton(
+                    f"🆕 Новая история {new_story_id}",
+                    web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{new_story_id}")
+                )
+            ]
+        ]
+
+        # Остальные истории
+        for sid in sorted_story_ids:
+            keyboard_rows.append([
+                InlineKeyboardButton(
+                    f"📘 История {sid}",
+                    web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{target_user_id}_{sid}")
+                )
+            ])
+
+        keyboard = InlineKeyboardMarkup(keyboard_rows)
+
+        # ======== Ответ =========
+
+        response_text = (
+            f"✅ *История скопирована!*\n"
+            f"📂 Исходный ID: `{target_story_id}`\n"
+            f"🆕 Новый ID у user 000: `{new_story_id}`"
+        )
+
+        await message.reply_text(
+            response_text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при трансфере истории: {e}", exc_info=True)
+
+        try:
+            await message.reply_text(
+                f"❌ Ошибка при обработке:\n`{e}`",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
 
 
 
@@ -10775,46 +11151,41 @@ async def generate_neural_story_full(query):
     """
 
     system_instruction = (
-        "Ты — нейросеть, создающая интерактивные текстовые истории в формате JSON для Telegram-бота. Истории имеют разветвлённую структуру с учётом пользовательских атрибутов. Вот строгие правила, которым ты должен следовать:\n\n"
-        
-        "1. Структура JSON:\n"
-        "   - Ключ \"title\": строка с названием истории.\n"
-        "   - Ключ \"fragments\": словарь фрагментов, где каждый ключ — уникальное имя фрагмента (например, main_1, rest_2).\n"
-        "   - Первый фрагмент ВСЕГДА должен иметь ключ 'main_1'.\n"
-        "   - Имена фрагментов: максимум 15 символов, разрешены кириллица, латиница и цифры, одно подчёркивание перед числом в конце — допустимо. Примеры: fight_1, сон_3, market_5.\n"
-        "   - Имена фрагментов должны логично отражать суть сцены.\n"
-        
-        "2. Каждый фрагмент содержит:\n"
-        "   - \"text\": текст фрагмента, который увидит пользователь. Внутри текста можно использовать вставку атрибутов в формате {{атрибут}} (например: 'Ваша сила: {{сила}}').\n"
-        "   - \"media\": всегда указывай пустой список: []\n"
-        "   - \"choices\": список вариантов (не более 10), каждый из которых — объект со следующими полями:\n"
-        "       - \"text\": подпись кнопки (до 25 символов).\n"
-        "       - \"target\": имя следующего фрагмента, на который ведёт выбор (обязательно должен существовать, без пробелов, максимум одно подчёркивание перед номером).\n"
-        "       - \"effects\": список эффектов (опционально). Каждый эффект — объект с:\n"
-        "           - \"stat\": имя атрибута (например, сила, мотивация, письмо и т.д.).\n"
-        "           - \"value\": может быть:\n"
-        "               - числом без знака (например, 3) — установить значение атрибута в 3;\n"
-        "               - со знаком + или - (например, +2, -5) — увеличить или уменьшить значение атрибута;\n"
-        "               - проверкой: >N, <N или =N — доступность выбора зависит от проверки. Например, '>5' означает, что выбор будет доступен только если значение атрибута больше 5.\n"
-        "           - \"hide\": true или false. Если true, то:\n"
-        "               - пользователь не увидит изменения атрибутов;\n"
-        "               - кнопка скрыта, если не проходят проверки (например, сила < 5).\n"
-        "             Если false:\n"
-        "               - пользователь видит сообщение об изменении атрибутов;\n"
-        "               - кнопка отображается всегда, но недоступна при несоответствии условий (можно нажимать несколько раз, пока не наберётся нужное значение).\n"
-
-        "3. Поведение эффектов с проверками:\n"
-        "   - Эффекты применяются СТРОГО ПО ПОРЯДКУ. Сначала начисления, потом проверки. Это позволяет реализовать накопительные действия (например, жать на кнопку, чтобы набрать силу).\n"
-        "   - Если сначала идёт проверка (>5), а потом начисление (+2), то кнопка НЕ БУДЕТ работать до выполнения условия.\n"
-
-        "4. Общие требования:\n"
-        "   - История должна быть логичной, интересной, с разветвлениями и вариативностью.\n"
-        "   - Разные фрагменты могут вести к одним и тем же целям.\n"
-        "   - Не создавай 'мертвые' переходы: каждый target должен вести к реально существующему фрагменту (если пользователь не просил иначе).\n"
-        "   - Разрешается делать незавершённые истории, если пользователь захочет их дописать позже, но только если явно указано.\n"
-        "   - Придерживайся указанного количества фрагментов или вариативно близкого (например, 12-15 при просьбе «на 13 сцен»).\n"
-        "   - Не выходи за пределы JSON — никакого текста вне структуры, пояснений или комментирования.\n\n"
-
+        "Ты — архитектор сложных интерактивных миров. Твоя задача — создать разветвленную историю в формате JSON с использованием игровой механики (характеристики, проверки, инвентарь) для телеграм-бота.\n\n"
+        "ФОРМАТ ДАННЫХ (JSON):\n"
+        "История представляется объектом с двумя ключами: \"title\" и \"fragments\".\n"
+        "1. Структура фрагментов:\n"
+        "   - Стартовый фрагмент всегда строго: \"main_1\".\n"
+        "   - Названия ключей фрагментов: не более 17 символов, только латиница/цифры/нижнее подчеркивание. Фрагменты одной ветки нумеруй (например, Forest_1, Forest_2).\n"
+        "2. Содержание фрагмента:\n"
+        "   - \"text\": основной текст.\n"
+        "   - \"media\": всегда пустой список [].\n"
+        "   - \"choices\": список объектов (кнопок).\n\n"
+        "ПРОДВИНУТЫЙ ФУНКЦИОНАЛ (МЕХАНИКИ):\n"
+        "1. АТРИБУТЫ И ПРОВЕРКИ (внутри \"choices\"):\n"
+        "   В объекты внутри списка choices добавь ключ \"effects\" (список). Элементы списка — объекты:\n"
+        "   - \"stat\": имя характеристики (например: \"gold\", \"hp\", \"strength\").\n"
+        "   - \"value\":\n"
+        "       - \"+10\" / \"-5\": изменить значение.\n"
+        "       - \"5\": установить точное значение.\n"
+        "       - \">5\", \"<3\", \"=1\": ПРОВЕРКА. Если условие не выполнено, кнопка недоступна.\n"
+        "   - \"hide\": true/false. Если true — игрок не видит уведомления о получении стата или причине блокировки.\n"
+        "2. ОТОБРАЖЕНИЕ АТРИБУТОВ:\n"
+        "   В поле \"text\" используй {{stat_name}} для подстановки значений. Пример: \"У вас {{gold}} монет.\"\n"
+        "3. ДИНАМИЧЕСКИЙ ТЕКСТ (ТАЙМЕРЫ):\n"
+        "   Используй тег [[+N]], где N — секунды (целое число > 3). Текст до тега показывается сразу, после тега — через паузу.\n"
+        "4. АВТОМАТИЧЕСКИЕ ПЕРЕХОДЫ:\n"
+        "   Если в поле \"text\" внутри choices указано число в виде строки (например, \"5.0\"), то кнопка не отображается, а бот сам переключит на target через 5 секунд.\n\n"
+        "ТЕХНИЧЕСКИЕ ОГРАНИЧЕНИЯ:\n"
+        "1. Поле \"text\" в choices (надпись на кнопке): максимум 25 символов.\n"
+        "2. Поле \"target\" в choices: имя следующего фрагмента (макс. 20 символов, без пробелов, допускается одно нижнее подчеркивание перед цифрой).\n"
+        "3. Максимум 10 выборов на один фрагмент.\n"
+        "4. Названия фрагментов и кнопок должны быть уникальны.\n\n"
+        "ВАЖНЫЕ УКАЗАНИЯ ПО БАЛАНСУ:\n"
+        "- Не перегружай историю проверками в каждом шаге.\n"
+        "- Логика превыше всего: давай альтернативные пути при провале проверок.\n"
+        "- Выводи ТОЛЬКО валидный JSON без markdown-тегов (```json), комментариев и лишнего текста.\n"
+        "- Генерируй запрошенное пользователем количество фрагментов. История может быть незаконченной и ссылаться на пустые фрагменты (их сгенерирует другая функция).\n\n"
         "ВЫВОДИ ТОЛЬКО JSON. Пример структуры:\n"
         "{\n"
         "  \"title\": \"Пример истории\",\n"
@@ -10892,23 +11263,43 @@ async def generate_neural_story(query):
     """
 
     system_instruction = (
-        "Ты — нейросеть, создающая интерактивные текстовые истории для телеграм-бота в строго заданном JSON-формате. Ниже приведены правила структуры:\n\n"
-        "1. История представляется в виде JSON с двумя ключами: \"title\" (название истории) и \"fragments\" (словарь фрагментов истории). Первый фрагмент всегда строго main_1, остальные имеют любое название, но не превышающее длину 17 символов, это крайне важно. Так же фрагменты относящиеся к одной логической цепочке событий(к одной ветке), имеют в конце число через нижнее подчёркивание. Например GoToForest_1, GoToForest_2 и тд.\n"
-        "2. Каждый фрагмент в \"fragments\" содержит:\n"
-        "   - \"text\": основной текст для показа пользователю.\n"
-        "   - \"media\": массив с медиа (всегда указывай его пустым, поскольку ты не можешь добавлять изображения).\n"
-        "   - \"choices\": список объектов с ключами:\n"
-        "       - \"text\": надпись на кнопке (максимум 25 символов);\n"
-        "       - \"target\": имя следующего фрагмента (максимум 20 символов, без пробелов, допускается одно нижнее подчёркивание перед номером ветки, только латиница/кириллица и цифры).\n"
-        "Крайне важное условие: значение \"target\" не должно иметь пробелы и максимум одно нижнее подчёркивание перед цифрой, указывающей номер данного события в той или иной ветке.\n"
-        "Любой фрагмент может ссылаться на любой иной фрагмент через choices. Максимальное число выборов на один фрагмент — 10.\n"
-        "Для удобства нумеруй логически связанные события одной ветки, например GoToForest_1, GoToForest_2 и т.д.\n"
-        "3. Названия фрагментов и кнопок должны быть уникальны, понятны и соответствовать смыслу происходящего.\n"
-        "4. История может быть с юмором, элементами фэнтези или драмы, но всегда логична и последовательна.\n"
-        "5. Выводи только JSON, без лишнего текста, комментариев и пояснений. Результат должен быть валидным JSON с ключами \"title\" и \"fragments\".\n\n"
-        "Будь внимателен. Нарушение структуры приведёт к невозможности обработки истории в Telegram-боте."
-        "Пользователь укажет тебе в запросе желаемое число фрагментов(fragments) истории, ориентируйся на него и сгенерируй связную законченную историю без ссылок на пустые не созданные фрагменты, но при этом достаточно варьиативную, ветвистую и интересную для прохождения."
-        "История может быть не законченной и ссылаться на пустые фрагменты, в таком случае их будет генерировать иная функция."
+        "Ты — профессиональный сценарист визуальных новелл. Твоя задача — сгенерировать интерактивную историю в формате JSON, которую сможет обработать программный код.\n\n"
+        "СТРОГИЕ ПРАВИЛА СТРУКТУРЫ:\n"
+        "1. Результат должен быть валидным JSON-объектом.\n"
+        "2. Корневые ключи объекта: \"title\" (название истории) и \"fragments\" (словарь фрагментов).\n"
+        "3. Самый первый фрагмент ОБЯЗАТЕЛЬНО должен иметь ключ \"main_1\".\n"
+        "4. Ключи остальных фрагментов (ID) должны состоять только из латинских букв, цифр и одного нижнего подчёркивания (например: forest_1, tavern_2, fight_1). Не используй пробелы в ключах.\n"
+        "5. Каждый фрагмент внутри \"fragments\" должен содержать:\n"
+        "   - \"text\": Текст сцены (можно использовать HTML-теги <b>, <i>).\n"
+        "   - \"media\": Оставь пустым списком [].\n"
+        "   - \"choices\": Список вариантов действий.\n\n"
+        "ПРАВИЛА ДЛЯ CHOICES (ВЫБОРОВ):\n"
+        "Каждый элемент списка \"choices\" — это объект с полями:\n"
+        "- \"text\": Текст на кнопке (не более 25 символов).\n"
+        "- \"target\": ID фрагмента, к которому ведёт эта кнопка (должен совпадать с ключом существующего фрагмента).\n\n"
+        "ТРЕБОВАНИЯ К СЮЖЕТУ:\n"
+        "- История должна быть логичной и связной.\n"
+        "- Избегай \"тупиков\" (фрагментов без choices), если это не концовка истории.\n"
+        "- Создавай ветвления: разные выборы должны вести к разным последствиям.\n\n"
+        "ПРИМЕР ФОРМАТА:\n"
+        "{\n"
+        "  \"title\": \"Прогулка в лесу\",\n"
+        "  \"fragments\": {\n"
+        "    \"main_1\": {\n"
+        "      \"text\": \"Вы стоите на опушке леса. Куда пойдете?\",\n"
+        "      \"media\": [],\n"
+        "      \"choices\": [\n"
+        "        {\"text\": \"В чащу\", \"target\": \"forest_1\"},\n"
+        "        {\"text\": \"К реке\", \"target\": \"river_1\"}\n"
+        "      ]\n"
+        "    },\n"
+        "    \"forest_1\": {\n"
+        "      \"text\": \"Тут темно и страшно.\",\n"
+        "      \"media\": [],\n"
+        "      \"choices\": []\n"
+        "    }\n"
+        "  }\n"
+        "}"
     )
 
     context = (
@@ -10945,9 +11336,6 @@ async def generate_neural_story(query):
     except Exception as e:
         logger.error("Ошибка при генерации ответа от Gemini: %s", e)
         return "Произошла ошибка. Попробуйте позже."
-
-
-
 
 
 
@@ -11191,8 +11579,11 @@ def main() -> None:
     # Добавить сюда обработчик для кнопок вида 'play_{user_id}_start' для запуска просмотра
     # application.add_handler(CallbackQueryHandler(play_story_handler, pattern='^play_'))
     application.add_handler(CallbackQueryHandler(show_story_fragment, pattern=r"^play_\d+_[a-f0-9]+_[\w\d._]+$"))
-    application.add_handler(CallbackQueryHandler(restart, pattern='^restart_callback$')) # <-- ДОБАВЛЕНО: Обработчик кнопки рестарта вне диалога    
+    application.add_handler(CallbackQueryHandler(restart, pattern='^restart_callback$')) # <-- ДОБАВЛЕНО: Обработчик кнопки рестарта вне диалога
+    application.add_handler(CallbackQueryHandler(start_interactive_training, pattern="interactive_training_start"))   
     # Запуск бота
+    application.add_handler(CommandHandler("transfer", transfer_to_index))
+    application.add_handler(CommandHandler("transapp", transfer_story_command))    
     application.add_handler(CallbackQueryHandler(handle_neuralstart_story_callback, pattern=r"^nstartstory_[\w\d]+_[\w\d]+$"))
     application.add_handler(CommandHandler("restart", restart)) 
     application.add_handler(CommandHandler("delete", delete_inline_stories))
@@ -11206,6 +11597,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
