@@ -5927,7 +5927,7 @@ async def handle_full_nstory_command(update: Update, context: ContextTypes.DEFAU
     command_and_args = message_text.split(" ", 1)
     if len(command_and_args) < 2:
         await update.message.reply_text(
-            "❗ <b>Пожалуйста, укажите, о чём именно вы хотите сгенерировать историю после команды</b> <code>/nstory</code>\n\n"
+            "❗ <b>Пожалуйста, укажите, о чём именно вы хотите сгенерировать историю после команды</b> <code>/nfullstory</code>\n\n"
             "Вы можете как дать общие указания касательно тематики, так и пошагово по фрагментам описать, что именно вам нужно.\n\n"
             "<b>Например:</b>\n"
             "<pre>/nfullstory история про ведьмака на 15 фрагментов. Первый фрагмент ознакомительный, во втором происходит распределение изначальных характеристик персонажа: внимание 7, сила 11, ловкость 8. Далее идут два фрагмента, один из которых даёт... и т. д.</pre>\n"
@@ -6026,7 +6026,7 @@ DEBUG_DIR = "stories_debug"
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
-async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean_title: str) -> int:
+async def neural_full_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean_title: str) -> int:
     user = update.message.from_user
     user_id = user.id
     username = user.full_name  # или user.username, если нужен ник
@@ -6045,7 +6045,7 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
         raw_response = None
         try:
             # Убедитесь, что generate_neural_story, save_story_data и DEBUG_DIR определены
-            raw_response = await generate_neural_story(clean_title)
+            raw_response = await generate_neural_story_full(clean_title)
 
             if not isinstance(raw_response, str):
                 raw_response = json.dumps(raw_response, ensure_ascii=False)
@@ -6075,12 +6075,11 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
             context.user_data['next_choice_index'] = 1
 
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")],
-                [InlineKeyboardButton("▶️ Открыть в ЛС с ботом", url=f"https://t.me/{context.bot.username}?start={story_id}")]
+                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")]
             ])
 
             await waiting_message.edit_text(
-                f"✅ <b>История успешно сгенерирована!</b>\n\n📖 <b>Название: {generated_story['title']}</b>\n🆔 <b>ID:</b> <code>{story_id}</code>\n\nДля запуска воспользуйтесь кнопкой ниже",
+                f"✅ <b>История успешно сгенерирована!</b>\n\n<b>Название: {generated_story['title']}</b>\n\nДля запуска воспользуйтесь кнопкой ниже",
                 reply_markup=keyboard,
                 parse_mode='HTML'
             )
@@ -6094,7 +6093,7 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
             logger.error(f"Ошибка при генерации истории для пользователя {user_id}: {e}")
             try:
                 await waiting_message.edit_text(
-                    "⚠️ Произошла ошибка при генерации истории. Нейросеть иногда сбоит и возвращает не верные данные, попробуйте ещё раз."
+                    "⚠️ Произошла ошибка при генерации истории. Это очень сложная для нейросети задача, поэтому во многих случаях она может возврщать неверные данные которые бот не сможет обработать или обработает не верно приходя к ошибке. Попытайтесь ещё раз. Eсли запрос очень сложный, то попробуйте упростить. Так же можете выбрать более простую функцию /nstory"
                 )
             except Exception as e_edit:
                 logger.warning(f"Не удалось изменить сообщение ожидания при ошибке (neural_story): {e_edit}")
@@ -6106,8 +6105,6 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
     task.add_done_callback(lambda t: _remove_task_from_context(t, context.user_data))
 
     return ConversationHandler.END
-
-
 
 async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean_title: str) -> int:
     user = update.message.from_user
@@ -11666,6 +11663,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
