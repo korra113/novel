@@ -4105,72 +4105,177 @@ def build_neuro_fragment_keyboard(user_id_str: str, story_id: str, fragment_ids:
 
 #==========================================================================
 #СНОВНАЯ ЛОГИКА
-
 def parse_timed_edits(text):
     steps = []
-    # Обновлённый паттерн: поддержка [[+2]] и ((-4))
-    pattern = re.compile(r"(\[\[|\(\()([+-])(\d+)(\]\]|\)\))")
-    matches = list(pattern.finditer(text))
+    
+    # Регулярка ищет:
+    # 1. Маркеры времени: [[+1]], ((-1)), [[-5]] и т.д.
+    # 2. HTML теги: <tag>, </tag>
+    token_pattern = re.compile(r"((?:\[\[|\(\()([+-])(\d+)(?:\]\]|\)\)))|(</?(\w+)[^>]*>)")
+    
+    current_text = ""
+    tag_stack = []
+    last_idx = 0
+    
+    for match in token_pattern.finditer(text):
+        # Добавляем обычный текст, который был до найденного токена
+        current_text += text[last_idx:match.start()]
+        last_idx = match.end()
+        
+        # --- Если нашли маркер времени [[...]] ---
+        if match.group(1):
+            mode = match.group(2) # + или -
+            delay = min(int(match.group(3)), 60)
+            
+            # 1. Создаем "снимок" того, что должно быть на экране ВО ВРЕМЯ паузы.
+            # Для валидности HTML закрываем все открытые теги
+            closing_suffix = "".join([f"</{tag}>" for tag in reversed(tag_stack)])
+            step_full_text = current_text + closing_suffix
+            
+            steps.append({
+                "delay": delay,
+                "full_text": step_full_text
+            })
+            
+            # 2. Применяем эффект для СЛЕДУЮЩЕГО куска текста
+            if mode == '-':
+                # Если минус - полностью стираем историю текста и стек тегов
+                current_text = ""
+                tag_stack = []
+            
+            # Если mode == '+', то current_text и tag_stack остаются как есть,
+            # и следующий текст просто добавится к ним.
 
-    for idx, match in enumerate(matches):
-        symbol, raw_seconds = match.group(2), match.group(3)
-        delay = min(int(raw_seconds), 60)
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        content = text[start:end]
-        if symbol == "-" and not content.strip():
-            continue
-        steps.append({
-            "delay": delay,
-            "mode": symbol,
-            "text": content,
-            "insert_at": start
-        })
+        # --- Если нашли HTML тег ---
+        elif match.group(4):
+            tag_full = match.group(4)
+            tag_name = match.group(5).lower()
+            
+            is_closing = tag_full.startswith("</")
+            is_void = tag_name in ['br', 'hr', 'img'] 
+            
+            if is_void:
+                current_text += tag_full
+            else:
+                if not is_closing:
+                    # Открывающий тег: добавляем в текст и в стек
+                    current_text += tag_full
+                    tag_stack.append(tag_name)
+                else:
+                    # Закрывающий тег:
+                    # ВАЖНО: Добавляем его, только если он соответствует открытому тегу в стеке.
+                    # Это защищает от ошибок при использовании [[-N]], когда стек очищается, 
+                    # но в исходной строке дальше идет </b>.
+                    if tag_stack and tag_stack[-1] == tag_name:
+                        current_text += tag_full
+                        tag_stack.pop()
+                    else:
+                        # Если тег закрывающий, но стек пуст (или тег не совпадает),
+                        # мы его ПРОПУСКАЕМ, чтобы не отправлять в Telegram невалидный HTML (например "Текст</b>")
+                        pass
 
+    # --- Финальная сборка ---
+    
+    # 1. Добавляем остаток текста после последнего маркера
+    if last_idx < len(text):
+        current_text += text[last_idx:]
+        
+    # 2. Закрываем теги, если какие-то остались открытыми
+    closing_suffix = "".join([f"</{tag}>" for tag in reversed(tag_stack)])
+    final_full_text = current_text + closing_suffix
+
+    # 3. Добавляем финальный шаг (отображение результата)
+    # delay=0 означает, что он применится сразу после окончания предыдущей паузы
+    steps.append({
+        "delay": 0, 
+        "full_text": final_full_text
+    })
+    
     return steps
 
 
-async def run_timed_edits(bot, chat_id, message_id, original_text, steps, is_caption, user_id_str, story_id):
-    current_text = original_text
-    for step in steps:
-        await sleep(step["delay"])
-        if step["mode"] == "+":
-            insert_text = step["text"]
-            pos = step["insert_at"]
-            current_text = current_text[:pos] + insert_text + current_text[pos:]
-        elif step["mode"] == "-":
-            current_text = step["text"]
 
 
-        # Создаём кнопки
-        buttons = [
-            [InlineKeyboardButton(
-                "▶️ Воспроизвести историю отсюда",
-                callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1"
-            )],
-            [InlineKeyboardButton("❌ Закрыть это окно", callback_data="delete_this_message")]
-        ]
+async def run_timed_edits(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    original_text: str, # Больше не используется для склеивания, но может пригодиться для логов
+    steps: List[Dict],
+    is_caption: bool,
+    reply_markup_to_preserve: Optional[InlineKeyboardMarkup],
+    task_key_to_manage: str,
+):
+    """
+    Выполняет пошаговое редактирование сообщения.
+    """
+    # logger.debug(f"Starting run_timed_edits_full for msg {message_id}")
 
-        try:
-            if is_caption:
-                await bot.edit_message_caption(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    caption=current_text.strip(),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
-            else:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=current_text.strip(),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup(buttons)
-                )
-        except Exception as e:
-            print(f"Ошибка при редактировании: {e}")
-            break
+    try:
+        last_sent_text = None
+
+        for i, step in enumerate(steps):
+            delay = step.get("delay", 0)
+            text_to_send = step.get("full_text", "")
+
+            # Защита от отправки пустого текста (Telegram не разрешает)
+            if not text_to_send.strip():
+                text_to_send = " " # Невидимый пробел или просто пробел
+
+            # Ждем указанное время перед тем, как показать ЭТОТ кадр (или следующий?
+            # По логике: "Показать А, подождать N, Показать Б".
+            # Парсер сформировал step так: "Текст ДО паузы", delay=N.
+            # Значит, мы сначала должны убедиться, что "Текст ДО паузы" виден, потом ждать.
+            # Но обычно сообщение уже отправлено с начальным текстом (base_text).
+            # Поэтому мы сначала ждем (чтобы зритель успел прочитать предыдущее), а потом обновляем на НОВОЕ состояние?
+            # ВНИМАНИЕ: Логика [[+N]] обычно значит "появилось это, ждем N, появляется следующее".
+            
+            if delay > 0:
+                await asyncio.sleep(delay)
+            
+            # Если текст не изменился с прошлого шага (например, шаг дублирует начальное состояние), пропускаем запрос к API
+            if text_to_send == last_sent_text:
+                continue
+
+            try:
+                if is_caption:
+                    await bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        caption=text_to_send,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup_to_preserve,
+                    )
+                else:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text_to_send,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup_to_preserve,
+                    )
+                last_sent_text = text_to_send
+
+            except BadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    # Это нормально, если текст совпал с тем, что уже есть
+                    last_sent_text = text_to_send
+                    continue
+                if "message to edit not found" in str(e).lower():
+                    # Сообщение удалили, останавливаемся
+                    break
+                # logger.error(f"BadRequest in timed edits: {e}")
+                break
+            except Exception as e:
+                # logger.error(f"Error in timed edits step {i}: {e}")
+                break
+
+    except asyncio.CancelledError:
+        pass # Задача была отменена штатно
+        # logger.info(f"Task {task_key_to_manage} cancelled.")
+    except Exception as e:
+        pass
+        # logger.error(f"Unexpected error in run_timed_edits_full: {e}", exc_info=True)
 
 
 
@@ -4663,8 +4768,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.answer()
         fragment_id = data[len("preview_fragment_"):]
 
-        # Логируем содержимое context.user_data
-        logger.info("context.user_data: %s", context.user_data)
+        # Логируем
+        # logger.info("context.user_data: %s", context.user_data)
 
         story_data = context.user_data.get("current_story", {})
         fragment_data = story_data.get("fragments", {}).get(fragment_id)
@@ -4675,9 +4780,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         text = fragment_data.get("text", "")
         media = fragment_data.get("media", [])
-        first_match = re.search(r"(\[\[|\(\()[+-]?\d+(\]\]|\)\))", text)
-        base_text = text[:first_match.start()] if first_match else text
+        
+        # --- НОВАЯ ЛОГИКА ПАРСИНГА ---
+        # Сначала парсим все шаги
         steps = parse_timed_edits(text)
+        
+        # base_text - это то, что мы покажем СРАЗУ. 
+        # Если есть шаги, берем текст первого шага (он уже содержит закрытые теги).
+        # Если шагов нет, берем просто весь текст.
+        base_text = steps[0]['full_text'] if steps else text
+        # -----------------------------
 
         # Получаем user_id и story_id
         user_id_str = context.user_data.get("user_id_str")
@@ -4687,40 +4799,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.message.reply_text("Ошибка: user_id или story_id не найдены.", parse_mode=ParseMode.HTML)
             return
 
+        # Кнопки, которые должны сохраняться при редактировании
         close_button = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"▶️ Воспроизвести историю отсюда", callback_data=f"nstartstory_{user_id_str}_{story_id}_{fragment_id}")],
             [InlineKeyboardButton("❌ Закрыть это окно", callback_data="delete_this_message")],
         ])
 
-
-
-
+        # 1. СЛУЧАЙ: Нет ни медиа, ни текста (пусто)
         if not media and not text:
             await query.message.reply_text("Фрагмент пуст.", reply_markup=close_button, parse_mode=ParseMode.HTML)
             return
 
+        # 2. СЛУЧАЙ: Только текст (без медиа)
         elif not media:
             msg = await query.message.reply_text(base_text, reply_markup=close_button, parse_mode=ParseMode.HTML)
+            
             if steps:
-                create_task(run_timed_edits(
+                task_key = f"edit_msg_{msg.chat_id}_{msg.message_id}"
+                # Регистрируем задачу в глобальном словаре (если нужно для отмены)
+                # global active_edit_tasks; active_edit_tasks[task_key] = ... (это делается через asyncio.create_task)
+                
+                task = asyncio.create_task(run_timed_edits(
                     bot=context.bot,
                     chat_id=msg.chat_id,
                     message_id=msg.message_id,
-                    original_text=base_text,
+                    original_text=text, # Для логов
                     steps=steps,
                     is_caption=False,
-                    user_id_str=user_id_str,
-                    story_id=story_id
+                    reply_markup_to_preserve=close_button,
+                    task_key_to_manage=task_key
                 ))
+                
+                # Сохраняем ссылку на задачу, чтобы run_timed_edits_full мог её удалить из словаря по завершении
+
             return
 
-        # Медиа-группа
+        # 3. СЛУЧАЙ: Группа медиа (альбом)
         if len(media) > 1:
             media_group = []
             for i, m in enumerate(media):
                 m_type = m.get("type")
                 file_id = m.get("file_id")
                 spoiler = m.get("spoiler") is True
+                # Caption ставим только первому элементу
                 caption = base_text if i == 0 else None
 
                 if m_type == "photo":
@@ -4749,62 +4870,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 chat_id=query.message.chat_id,
                 media=media_group
             )
+            # Сохраняем ID для возможного удаления
             context.user_data["preview_message_ids"] = [msg.message_id for msg in media_messages]
-            await query.message.reply_text("Закрыть", reply_markup=close_button, parse_mode=ParseMode.HTML)
+            
+            # Отправляем отдельное сообщение с кнопками (так как у медиагруппы нет кнопок)
+            await query.message.reply_text("Управление:", reply_markup=close_button, parse_mode=ParseMode.HTML)
 
             if steps:
-                # Только caption первого сообщения редактируется
-                create_task(run_timed_edits(
+                # Редактируем caption только у первого сообщения группы
+                target_msg = media_messages[0]
+                task_key = f"edit_msg_{target_msg.chat_id}_{target_msg.message_id}"
+                
+                task = asyncio.create_task(run_timed_edits(
                     bot=context.bot,
-                    chat_id=query.message.chat_id,
-                    message_id=media_messages[0].message_id,
-                    original_text=base_text,
+                    chat_id=target_msg.chat_id,
+                    message_id=target_msg.message_id,
+                    original_text=text,
                     steps=steps,
                     is_caption=True,
-                    user_id_str=user_id_str,
-                    story_id=story_id
-                ))
-
-        else:
-            m = media[0]
-            m_type = m.get("type")
-            file_id = m.get("file_id")
-            spoiler = m.get("spoiler") is True
-
-            if m_type == "photo":
-                msg = await query.message.reply_photo(
-                    file_id, caption=base_text or None, reply_markup=close_button,
-                    parse_mode=ParseMode.HTML, has_spoiler=spoiler
-                )
-            elif m_type == "video":
-                msg = await query.message.reply_video(
-                    file_id, caption=base_text or None, reply_markup=close_button,
-                    parse_mode=ParseMode.HTML, has_spoiler=spoiler
-                )
-            elif m_type == "animation":
-                msg = await query.message.reply_animation(
-                    file_id, caption=base_text or None, reply_markup=close_button,
-                    parse_mode=ParseMode.HTML, has_spoiler=spoiler
-                )
-            elif m_type == "audio":
-                msg = await query.message.reply_audio(
-                    file_id, caption=base_text or None, reply_markup=close_button,
-                    parse_mode=ParseMode.HTML
-                )
-            else:
-                await query.message.reply_text("Неподдерживаемый тип медиа.", parse_mode=ParseMode.HTML)
-                return
-
-            if steps:
-                create_task(run_timed_edits(
-                    bot=context.bot,
-                    chat_id=msg.chat_id,
-                    message_id=msg.message_id,
-                    original_text=base_text,
-                    steps=steps,
-                    is_caption=True,
-                    user_id_str=user_id_str,
-                    story_id=story_id
+                    reply_markup_to_preserve=None, # В медиагруппе кнопки не прикрепить к самому медиа
+                    task_key_to_manage=task_key
                 ))
 
 
@@ -10767,74 +10852,52 @@ async def auto_transition_task(
 
 
 async def run_timed_edits_full(
-    bot: Bot,  # Используем Bot для type hinting
+    bot: Bot,
     chat_id: int,
     message_id: int,
-    original_text: str,  # Это base_text (текст до первого тега [[...]])
+    original_text: str, # Больше не используется для склеивания, но может пригодиться для логов
     steps: List[Dict],
     is_caption: bool,
     reply_markup_to_preserve: Optional[InlineKeyboardMarkup],
-    task_key_to_manage: str,  # Ключ для удаления из active_edit_tasks
+    task_key_to_manage: str,
 ):
     """
-    Выполняет пошаговое редактирование сообщения для полного проигрывания истории.
-
-    original_text: Базовый текст (до тегов).
-    steps: Список шагов, где каждый шаг содержит "text" для добавления/замены суффикса.
+    Выполняет пошаговое редактирование сообщения.
     """
-    logger.debug(
-        f"Starting run_timed_edits_full for msg {message_id} with key {task_key_to_manage}. "
-        f"Original base text: '{original_text[:50]}...'"
-    )
-
-    # dynamic_suffix будет содержать часть текста, которая изменяется после original_text
-    dynamic_suffix = ""
-    current_full_text = original_text.strip() # Начальный текст - это просто базовый текст
-
-    # Первоначальная отправка/редактирование может быть уже сделана в render_fragment.
-    # Эта функция только применяет *последующие* правки.
-    # Если original_text пуст, а первый шаг - это "-", то суффикс станет этим текстом.
+    # logger.debug(f"Starting run_timed_edits_full for msg {message_id}")
 
     try:
+        last_sent_text = None
+
         for i, step in enumerate(steps):
-            await asyncio.sleep(step["delay"])  # Может вызвать CancelledError
+            delay = step.get("delay", 0)
+            text_to_send = step.get("full_text", "")
 
-            step_text_segment = step.get("text", "")
+            # Защита от отправки пустого текста (Telegram не разрешает)
+            if not text_to_send.strip():
+                text_to_send = " " # Невидимый пробел или просто пробел
 
-            if step["mode"] == "+":
-                if dynamic_suffix and step_text_segment: # Добавляем пробел, если уже есть суффикс и добавляемый текст не пуст
-                    dynamic_suffix += " " + step_text_segment
-                elif step_text_segment: # Если суффикса не было, или добавляемый текст не пуст
-                    dynamic_suffix += step_text_segment
-            elif step["mode"] == "-":
-                dynamic_suffix = step_text_segment # Заменяем весь суффикс
-
-            # Собираем полный текст для отображения
-            if step["mode"] == "-":
-                dynamic_suffix = step_text_segment
-                current_full_text = dynamic_suffix
-                original_text = ""  # 💥 Это ключевой момент!
-            elif original_text.strip() and dynamic_suffix:
-                current_full_text = original_text.rstrip() + " " + dynamic_suffix
-            elif dynamic_suffix: # Если базовый текст пустой
-                current_full_text = dynamic_suffix
-            else: # Если и суффикс пустой (например, после [[-]] без текста)
-                current_full_text = original_text.strip()
+            # Ждем указанное время перед тем, как показать ЭТОТ кадр (или следующий?
+            # По логике: "Показать А, подождать N, Показать Б".
+            # Парсер сформировал step так: "Текст ДО паузы", delay=N.
+            # Значит, мы сначала должны убедиться, что "Текст ДО паузы" виден, потом ждать.
+            # Но обычно сообщение уже отправлено с начальным текстом (base_text).
+            # Поэтому мы сначала ждем (чтобы зритель успел прочитать предыдущее), а потом обновляем на НОВОЕ состояние?
+            # ВНИМАНИЕ: Логика [[+N]] обычно значит "появилось это, ждем N, появляется следующее".
             
-            # На случай, если и original_text и dynamic_suffix пусты
-            if not current_full_text.strip() and original_text.strip(): # Если все стало пустым, но был ориг. текст, оставим его
-                 current_full_text = original_text.strip()
-            elif not current_full_text.strip(): # Если все действительно пусто
-                 current_full_text = " " # Отправка пустого сообщения может вызвать ошибку, отправляем пробел
-
-            logger.debug(f"Step {i+1} for msg {message_id}: mode='{step['mode']}', segment='{step_text_segment[:30]}...'. New full text: '{current_full_text[:50]}...'")
+            if delay > 0:
+                await asyncio.sleep(delay)
+            
+            # Если текст не изменился с прошлого шага (например, шаг дублирует начальное состояние), пропускаем запрос к API
+            if text_to_send == last_sent_text:
+                continue
 
             try:
                 if is_caption:
                     await bot.edit_message_caption(
                         chat_id=chat_id,
                         message_id=message_id,
-                        caption=current_full_text,
+                        caption=text_to_send,
                         parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup_to_preserve,
                     )
@@ -10842,66 +10905,38 @@ async def run_timed_edits_full(
                     await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
-                        text=current_full_text,
+                        text=text_to_send,
                         parse_mode=ParseMode.HTML,
                         reply_markup=reply_markup_to_preserve,
                     )
+                last_sent_text = text_to_send
+
             except BadRequest as e:
-                if "message to edit not found" in str(e).lower() or \
-                   "message is not modified" in str(e).lower() or \
-                   "message can't be edited" in str(e).lower():
-                    logger.warning(
-                        f"run_timed_edits_full: Message {message_id} not found, not modified, or can't be edited. "
-                        f"Stopping edits for task {task_key_to_manage}. Error: {e}"
-                    )
-                elif "message text is empty" in str(e).lower() and current_full_text == " ":
-                    logger.warning(
-                        f"run_timed_edits_full: Attempted to edit to empty message for msg {message_id}. "
-                        f"Consider handling this case if a truly empty message is intended."
-                    )
-                else:
-                    logger.error(
-                        f"run_timed_edits_full: BadRequest during API call for msg {message_id}, task {task_key_to_manage}. Error: {e}"
-                    )
-                break  # Прерываем цикл редактирования при ошибке API
-            except TelegramError as e:
-                logger.error(
-                    f"run_timed_edits_full: TelegramError during API call for msg {message_id}, task {task_key_to_manage}. Error: {e}"
-                )
+                if "message is not modified" in str(e).lower():
+                    # Это нормально, если текст совпал с тем, что уже есть
+                    last_sent_text = text_to_send
+                    continue
+                if "message to edit not found" in str(e).lower():
+                    # Сообщение удалили, останавливаемся
+                    break
+                # logger.error(f"BadRequest in timed edits: {e}")
                 break
             except Exception as e:
-                logger.error(
-                    f"run_timed_edits_full: Unexpected error during API call for msg {message_id}, task {task_key_to_manage}. Error: {e}",
-                    exc_info=True
-                )
+                # logger.error(f"Error in timed edits step {i}: {e}")
                 break
 
     except asyncio.CancelledError:
-        logger.info(f"run_timed_edits_full task {task_key_to_manage} (msg: {message_id}) was cancelled.")
+        pass # Задача была отменена штатно
+        # logger.info(f"Task {task_key_to_manage} cancelled.")
     except Exception as e:
-        logger.error(
-            f"Unexpected error in run_timed_edits_full task {task_key_to_manage} (msg: {message_id}): {e}",
-            exc_info=True
-        )
+        pass
+        # logger.error(f"Unexpected error in run_timed_edits_full: {e}", exc_info=True)
     finally:
-        # Удаляем задачу из активных таймеров после завершения или отмены
-        # Убедимся, что active_edit_tasks доступен в этой области видимости (глобальный или переданный)
-        global active_edit_tasks # Если active_edit_tasks - глобальная переменная
-        
-        current_async_task = asyncio.current_task() # Получаем текущую задачу asyncio
+        # Очистка из глобального словаря
+        global active_edit_tasks
+        current_async_task = asyncio.current_task()
         if task_key_to_manage in active_edit_tasks and active_edit_tasks[task_key_to_manage] is current_async_task:
             del active_edit_tasks[task_key_to_manage]
-            logger.debug(f"run_timed_edits_full task {task_key_to_manage} removed from active_edit_tasks.")
-        elif task_key_to_manage in active_edit_tasks:
-            logger.warning(
-                f"run_timed_edits_full task {task_key_to_manage} was in active_edit_tasks "
-                f"but was not the current task upon completion. This might indicate a quick restart or overwrite."
-            )
-        else:
-            logger.debug(
-                f"run_timed_edits_full task {task_key_to_manage} not found in active_edit_tasks upon completion "
-                f"(possibly already removed, cancelled and removed by new task, or never added)."
-            )
 
 
 
@@ -11629,6 +11664,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
