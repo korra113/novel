@@ -9991,7 +9991,7 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     original_target_fragment_id = target_fragment_id
     target_fragment_id_cleaned = re.sub(r'id\d+$', '', target_fragment_id)
-
+    logger.info(f"target_fragment_id_cleaned {target_fragment_id_cleaned} ")
     # Проверка для групповых чатов
     if message.chat.type in ("group", "supergroup"):
         if user_id_from_callback_str and int(user_id_from_callback_str) != actual_user_id:
@@ -10051,36 +10051,45 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Эффекты определены в выборе внутри *исходного* фрагмента.
         if target_fragment_id_cleaned == "main_912e":
             target_fragment_id_cleaned = "main_1"      
-            original_target_fragment_id = "main_1"      
+            original_target_fragment_id = "main_1"  
         user_progress_before_click = load_user_story_progress(story_id_from_data, actual_user_id)
         source_fragment_id = user_progress_before_click.get("fragment_id")
 
         if source_fragment_id:
             source_fragment_data = story_data_found.get("fragments", {}).get(source_fragment_id)
             logger.info(f"source_fragment_data: {source_fragment_data}")
+            
             if source_fragment_data:
                 effects_to_apply_for_choice = []
                 
-                # Шаг 1: Удаляем суффикс idX, если он есть
-                match = re.match(r"^(.*?)(?:id(\d+))?$", original_target_fragment_id)
-                if match:
-                    base_target_id = match.group(1)
-                    suffix_index = int(match.group(2)) if match.group(2) is not None else 0
+                # --- НОВАЯ ЛОГИКА ПОИСКА ЭФФЕКТОВ ---
+                
+                # 1. Извлекаем абсолютный индекс из callback_data (idX в конце строки)
+                # target_fragment_id — это строка вида "main_3id4"
+                match_index = re.search(r'id(\d+)$', original_target_fragment_id)
+                
+                if match_index:
+                    choice_index = int(match_index.group(1))
+                    all_choices = source_fragment_data.get("choices", [])
+                    
+                    # 2. Проверяем, существует ли такой индекс в списке
+                    if 0 <= choice_index < len(all_choices):
+                        selected_choice = all_choices[choice_index]
+                        
+                        # 3. Дополнительная проверка безопасности:
+                        # Убедимся, что cleaned target совпадает (на случай если структура истории изменилась на лету)
+                        # target_fragment_id_cleaned у вас уже вычислен выше (без id...)
+                        # Если у вас используется хак с main_912e -> main_1, учитываем это при сверке, или пропускаем сверку.
+                        
+                        # Просто берем эффекты
+                        effects_to_apply_for_choice = selected_choice.get("effects", [])
+                        logger.info(f"Эффекты взяты по индексу {choice_index}: {effects_to_apply_for_choice}")
+                    else:
+                        logger.error(f"Индекс {choice_index} выходит за пределы массива choices во фрагменте {source_fragment_id}")
                 else:
-                    base_target_id = original_target_fragment_id
-                    suffix_index = 0
-                
-                logger.info(f"Base target id: {base_target_id}, suffix index: {suffix_index}")
-                
-                # Шаг 2: Считаем совпадения target == base_target_id и ищем нужное по порядку
-                count = 0
-                for choice_in_source in source_fragment_data.get("choices", []):
-                    if choice_in_source.get("target") == base_target_id:
-                        if count == suffix_index:
-                            effects_to_apply_for_choice = choice_in_source.get("effects", [])
-                            logger.info(f"effects_to_apply_for_choice: {effects_to_apply_for_choice}")
-                            break
-                        count += 1
+                    logger.warning(f"В callback_data {original_target_fragment_id} не найден id index. Эффекты не будут применены.")
+
+                # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
                 
                 if effects_to_apply_for_choice:
                     proceed, alert_text_success, hide_button_signal = await process_choice_effects_on_click(
@@ -10095,7 +10104,7 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
                 else:
                     await query.answer()
             else:
-                logger.warning(f"Исходный фрагмент {source_fragment_id} не найден в данных истории {story_id_from_data}.")
+                logger.info(f"Исходный фрагмент {source_fragment_id} не найден в данных истории {story_id_from_data}.")
                 await query.answer("Ошибка: предыдущий фрагмент не найден.", show_alert=True)
                 return
         else:
@@ -10146,10 +10155,17 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     fragment_text_content = target_fragment_data.get("text", "")
     # base_text_for_display и edit_steps как в вашем коде
-    base_text_for_display = re.split(r"(\[\[[-+]\d+\]\]|\(\([-+]\d+\)\))", fragment_text_content, 1)[0].strip()
     current_effects = current_progress_after_effects.get("current_effects", {})
-    base_text_for_display = apply_effect_values(base_text_for_display, current_effects)    
-    edit_steps = parse_timed_edits(fragment_text_content)
+
+    # 1. СНАЧАЛА заменяем все {{тэги}} на значения во всем тексте целиком.
+    # Это позволяет использовать даже динамические таймеры (например: [[+{{delay}}]])
+    text_with_values = apply_effect_values(fragment_text_content, current_effects)
+
+    # 2. Теперь парсим таймеры из текста, где уже стоят числа/текст вместо {{...}}
+    edit_steps = parse_timed_edits(text_with_values)
+
+    # 3. Базовый текст для первого сообщения берем из обработанного текста (до первого таймера)
+    base_text_for_display = re.split(r"(\[\[[-+]\d+\]\]|\(\([-+]\d+\)\))", text_with_values, 1)[0].strip()
 
     await render_fragment(
         context=context,
@@ -10164,7 +10180,6 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
         base_text_for_display=base_text_for_display,
         edit_steps_for_text=edit_steps
     )
-
 
 def normalize_fragments(fragments: Dict[str, Any]) -> Dict[str, Any]:
     normalized = {}
@@ -10396,22 +10411,21 @@ async def render_fragment(
         if not is_button_visible:
             continue
 
-        # Считаем, сколько раз этот target уже встречался
-        count = target_counter[target]
-        target_counter[target] += 1
-
-        # Добавляем #N, если выбор не уникален
-        if count > 0:
-            target_with_index = f"{target}id{count}"
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        # Мы больше не считаем count. Мы используем i (индекс в списке JSON).
+        # Формируем target_with_index всегда с id, чтобы show_story_fragment мог легко его достать.
+        
+        # Хак для main_1 (если он вам еще нужен, применяем его к чистому таргету)
+        if target == "main_1":
+            actual_target_str = "main_912e"
         else:
-            target_with_index = target
+            actual_target_str = target
+            
+        # Формат: TARGET + id + INDEX (например: room_3id5)
+        target_with_index = f"{actual_target_str}id{i}"
 
-        # >>> ДОБАВЛЯЕМ ВАШЕ УСЛОВИЕ <<<
-        if target_with_index == "main_1":
-            target_with_index = "main_912e"
-        # <<< КОНЕЦ ДОБАВЛЕНИЯ >>>
-
-        logger.info(f"target_with_index: {target_with_index}")
+        logger.info(f"Generated button: {text} -> {target_with_index}")
+        # -----------------------
 
         button_display_text = text + requirement_text
         button_callback_data = f"play_{user_id}_{story_id}_{target_with_index}"
@@ -10500,7 +10514,7 @@ async def render_fragment(
     # Если show_story_fragment отменяет по "общему" ключу, а render_fragment создает по "общему" ключу,
     # то новый render_fragment отменит старую задачу редактирования перед запуском новой.
     edit_task_key = f"edit_{user_id}_{story_id}_{chat_id}"
-
+    logger.info(f"final_base_text_for_display------------------------------------------ {final_base_text_for_display}") 
     try:
         if media_content:
             if len(media_content) > 1: # Медиа-группа
@@ -10605,7 +10619,9 @@ async def render_fragment(
             can_edit_text = False
             # Если старое сообщение - медиа, его нельзя превратить в текст через edit (API запрещает).
             # Поэтому edit_text пробуем ТОЛЬКО если старое сообщение тоже текстовое.
+
             if message_to_update and message_to_update.text is not None: 
+                logger.info(f"final_base_text_for_display-----=================================--- {final_base_text_for_display}")                
                 try:
                     newly_sent_message_object = await message_to_update.edit_text(final_base_text_for_display, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
                     can_edit_text = True
