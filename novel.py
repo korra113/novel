@@ -46,8 +46,7 @@ import tempfile
 import time
 from asyncio import create_task, sleep
 from collections import defaultdict
-from datetime import datetime
-from datetime import timezone, timedelta
+
 import datetime
 from io import BytesIO
 from pathlib import Path
@@ -452,6 +451,459 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         await update.message.reply_text(f"Ошибка при обработке: {e}")
         return ADMIN_UPLOAD
+
+
+
+
+
+
+
+
+
+
+
+
+
+#=========================savegame=======================================
+
+import pytz
+ITEMS_PER_PAGE = 15
+
+
+
+def get_next_save_slot(user_id: int) -> int:
+    """Находит ближайший свободный слот для сохранения, начиная с 1."""
+    try:
+        ref = db.reference(f'user_saves/{user_id}')
+        saves = ref.get()
+        if not saves:
+            return 1
+        
+        # saves может быть списком (если ключи 0,1,2...) или словарем
+        if isinstance(saves, list):
+            existing_ids = {i for i, _ in enumerate(saves) if _ is not None}
+        else:
+            existing_ids = {int(k) for k in saves.keys()}
+            
+        slot = 1
+        while slot in existing_ids:
+            slot += 1
+        return slot
+    except Exception as e:
+        logger.error(f"Ошибка при поиске слота сохранения: {e}")
+        return 1
+
+
+
+
+
+
+def perform_save(user_id: int, story_id: str, save_type: str, owner_id: str, story_title: str):
+    """
+    Создает слепок состояния из story_settings и сохраняет в user_saves.
+    save_type: 'manual' или 'checkpoint'
+    """
+    try:
+        # 1. Загружаем текущий прогресс
+        progress_path = f'story_settings/{story_id}/{user_id}'
+        progress_ref = db.reference(progress_path)
+        progress_data = progress_ref.get()
+
+        if not progress_data:
+            logger.warning(f"Нечего сохранять для {user_id} в истории {story_id}")
+            return False
+
+        # 2. Определяем номер слота
+        slot_id = get_next_save_slot(user_id)
+
+        # 3. Формируем данные сохранения
+        moscow_tz = pytz.timezone('Europe/Moscow')
+
+        current_time = datetime.datetime.now(moscow_tz).strftime("%d.%m.%Y %H:%M")
+
+
+        save_data = {
+            "title": story_title,
+            "owner_id": str(owner_id),
+            "story_id": str(story_id), # Важно сохранить ID истории, чтобы знать, что загружать
+            "type": save_type,
+            "timestamp": current_time,
+            "data": progress_data # Сам слепок
+        }
+
+        # 4. Сохраняем
+        save_ref = db.reference(f'user_saves/{user_id}/{slot_id}')
+        save_ref.set(save_data)
+        logger.info(f"Сохранение {slot_id} ({save_type}) создано для пользователя {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при создании сохранения: {e}")
+        return False
+
+def get_user_saves(user_id: int):
+    """Получает все сохранения пользователя."""
+    try:
+        ref = db.reference(f'user_saves/{user_id}')
+        return ref.get()
+    except Exception as e:
+        logger.error(f"Ошибка получения сохранений: {e}")
+        return {}
+
+def delete_user_save(user_id: int, save_id: str):
+    """Удаляет конкретное сохранение."""
+    try:
+        ref = db.reference(f'user_saves/{user_id}/{save_id}')
+        ref.delete()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка удаления сохранения: {e}")
+        return False
+
+def load_save_to_settings(user_id: int, save_id: str):
+    """
+    Загружает данные из сохранения обратно в story_settings.
+    Возвращает кортеж (успех, owner_id, story_id, fragment_id).
+    """
+    try:
+        # 1. Получаем сохранение
+        save_ref = db.reference(f'user_saves/{user_id}/{save_id}')
+        save_snapshot = save_ref.get()
+
+        if not save_snapshot or 'data' not in save_snapshot:
+            return False, None, None, None
+
+        story_id = save_snapshot.get('story_id')
+        owner_id = save_snapshot.get('owner_id')
+        progress_data = save_snapshot.get('data')
+
+        if not story_id or not progress_data:
+            return False, None, None, None
+
+        # 2. Записываем в story_settings
+        settings_ref = db.reference(f'story_settings/{story_id}/{user_id}')
+        settings_ref.set(progress_data)
+        
+        fragment_id = progress_data.get('fragment_id')
+        
+        return True, owner_id, story_id, fragment_id
+    except Exception as e:
+        logger.error(f"Ошибка загрузки сохранения: {e}")
+        return False, None, None, None
+
+
+# --- Обработчик нажатия кнопки "Сохранить прогресс" ---
+async def manual_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data.split('_') # Ожидаем: manual_save_{owner_id}_{story_id}
+    
+    if len(data) < 4:
+        await query.answer("Ошибка данных кнопки.", show_alert=True)
+        return
+
+    owner_id = data[2]
+    story_id = data[3]
+    
+    # Нам нужно название истории. Можно попробовать достать из context.user_data если кэшировали,
+    # либо сделать быстрый запрос, либо (оптимально) передавать название в render_fragment и callback_data.
+    # Для надежности здесь сделаем быстрый запрос названия:
+    try:
+        story_ref = db.reference(f'users_story/{owner_id}/{story_id}/title')
+        story_title = story_ref.get() or "Без названия"
+    except:
+        story_title = "История"
+
+    success = perform_save(user_id, story_id, "Ручное", owner_id, story_title)
+    
+    if success:
+        await query.answer("✅ Прогресс успешно сохранен!", show_alert=True)
+    else:
+        await query.answer("❌ Ошибка при сохранении.", show_alert=True)
+    return ConversationHandler.END   # <<< ВЫХОД ИЗ ЛЮБОГО СОСТОЯНИЯ
+
+
+
+# --- Меню загрузки (Вызывается из главного меню) ---
+async def load_menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Точка входа. Сбрасывает настройки сортировки/страниц и показывает меню.
+    """
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    saves = get_user_saves(user_id)
+    
+    if not saves:
+        await query.answer("У вас нет сохранений.", show_alert=True)
+        return
+
+    # Инициализируем начальное состояние в user_data
+    context.user_data['load_menu_settings'] = {
+        'page': 0,           # Текущая страница (начинаем с 0)
+        'sort_by': 'time',   # По умолчанию сортируем по времени
+        'sort_rev': True     # По умолчанию новые сверху (True = убывание)
+    }
+
+    # Генерируем текст и клавиатуру
+    text, reply_markup = get_menu_content(saves, context.user_data['load_menu_settings'])
+    
+    await query.edit_message_text(
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode="HTML"
+    )
+
+async def load_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик нажатий на кнопки сортировки и пагинации.
+    Его нужно добавить в CallbackQueryHandler с паттерном (например, regex='^menu_').
+    """
+    query = update.callback_query
+    data = query.data
+    user_id = query.from_user.id
+    
+    # Получаем настройки и список сохранений
+    settings = context.user_data.get('load_menu_settings', {'page': 0, 'sort_by': 'time', 'sort_rev': True})
+    saves = get_user_saves(user_id)
+    
+    if not saves:
+        await query.answer("Сохранения не найдены.", show_alert=True)
+        return
+
+    # --- ЛОГИКА СОРТИРОВКИ ---
+    if data.startswith('menu_sort_'):
+        sort_type = data.split('_')[-1] # id, title, time
+        
+        if settings['sort_by'] == sort_type:
+            # Если нажали ту же кнопку - меняем направление
+            settings['sort_rev'] = not settings['sort_rev']
+        else:
+            # Если новую - ставим её и сбрасываем направление (по умолчанию)
+            settings['sort_by'] = sort_type
+            settings['sort_rev'] = True # или False, как вам удобнее по дефолту
+        
+        # При смене сортировки лучше вернуться на первую страницу
+        settings['page'] = 0
+
+    # --- ЛОГИКА ПАГИНАЦИИ ---
+    elif data == 'menu_page_prev':
+        if settings['page'] > 0:
+            settings['page'] -= 1
+            
+    elif data == 'menu_page_next':
+        # Проверку на макс. страницу делаем внутри рендера, но здесь для надежности
+        # (в данном примере просто уменьшаем/увеличиваем, перерисовка ограничит)
+        settings['page'] += 1
+
+    # Сохраняем обновленные настройки
+    context.user_data['load_menu_settings'] = settings
+    
+    # Перерисовываем меню
+    text, reply_markup = get_menu_content(saves, settings)
+    
+    # Чтобы не было ошибок "Message is not modified", оборачиваем в try
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass # Игнорируем, если контент не изменился
+    await query.answer()
+
+def get_menu_content(saves, settings):
+    """
+    Вспомогательная функция. 
+    Превращает сырые данные и настройки в готовый текст и клавиатуру.
+    """
+    # 1. Нормализация данных в список словарей
+    save_list = []
+    iterator = enumerate(saves) if isinstance(saves, list) else saves.items()
+    for s_id, s_data in iterator:
+        if not s_data: continue
+        # Создаем копию и добавляем ID внутрь для удобства сортировки
+        item = s_data.copy()
+        item['real_id'] = s_id
+        # Гарантируем наличие полей для сортировки
+        item['title'] = item.get('title', 'Unknown')
+        item['timestamp'] = item.get('timestamp', '')
+        save_list.append(item)
+
+    # 2. Сортировка
+    key = settings['sort_by']
+    reverse = settings['sort_rev']
+    
+    if key == 'id':
+        save_list.sort(key=lambda x: str(x['real_id']), reverse=reverse)
+    elif key == 'title':
+        save_list.sort(key=lambda x: x['title'].lower(), reverse=reverse)
+    elif key == 'time':
+        # Тут предполагается, что timestamp - это строка, которую можно сортировать лексикографически (ISO)
+        # или timestamp (число). Если формат даты 'DD.MM.YYYY', сортировка будет некорректной без парсинга.
+        save_list.sort(key=lambda x: x['timestamp'], reverse=reverse)
+
+    # 3. Пагинация
+    total_items = len(save_list)
+    total_pages = math.ceil(total_items / ITEMS_PER_PAGE)
+    
+    # Корректировка текущей страницы (чтобы не уйти за границы при удалении)
+    current_page = settings['page']
+    if current_page >= total_pages:
+        current_page = max(0, total_pages - 1)
+        settings['page'] = current_page
+
+    start_idx = current_page * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+    page_items = save_list[start_idx:end_idx]
+
+    # 4. Сборка клавиатуры
+    keyboard = []
+
+    # --- БЛОК СОРТИРОВКИ (ВЕРХ) ---
+    # Определяем иконки стрелок
+    def get_sort_icon(col_name):
+        if settings['sort_by'] == col_name:
+            return "🔽" if settings['sort_rev'] else "🔼"
+        return ""
+
+    sort_row = [
+        InlineKeyboardButton(f"№ {get_sort_icon('id')}", callback_data='menu_sort_id'),
+        InlineKeyboardButton(f"Имя {get_sort_icon('title')}", callback_data='menu_sort_title'),
+        InlineKeyboardButton(f"Время {get_sort_icon('time')}", callback_data='menu_sort_time'),
+    ]
+    keyboard.append(sort_row)
+
+    # --- БЛОК СПИСКА СОХРАНЕНИЙ (СЕРЕДИНА) ---
+    for item in page_items:
+        s_id = item['real_id']
+        title = item['title']
+        timestamp = item['timestamp']
+        s_type = item.get('type', 'Auto')
+
+        btn_text = f"{s_id}. {title} ({timestamp})"
+        if s_type == 'checkpoint':
+            btn_text += " 🚩"
+
+        load_btn = InlineKeyboardButton(btn_text, callback_data=f"load_game_{s_id}")
+        del_btn = InlineKeyboardButton("🗑", callback_data=f"del_save_{s_id}")
+        keyboard.append([load_btn, del_btn])
+
+    # --- БЛОК НАВИГАЦИИ (НИЗ) ---
+    nav_row = []
+    if total_pages > 1:
+        # Кнопка "Назад"
+        if current_page > 0:
+            nav_row.append(InlineKeyboardButton("⬅️", callback_data='menu_page_prev'))
+        else:
+            nav_row.append(InlineKeyboardButton("⬛", callback_data='ignore')) # Заглушка
+
+        # Индикатор страницы
+        nav_row.append(InlineKeyboardButton(f"{current_page + 1}/{total_pages}", callback_data='ignore'))
+
+        # Кнопка "Вперед"
+        if current_page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("➡️", callback_data='menu_page_next'))
+        else:
+            nav_row.append(InlineKeyboardButton("⬛", callback_data='ignore')) # Заглушка
+        
+        keyboard.append(nav_row)
+
+    keyboard.append([InlineKeyboardButton("🌃 В Главное Меню 🌃", callback_data='restart_callback')])
+
+    text = (
+        f"📂 <b>Ваши сохранения</b>\n"
+        f"Всего файлов: {total_items}\n"
+        f"Страница: {current_page + 1} из {max(1, total_pages)}\n\n"
+        f"<i>Нажмите на заголовки колонок для сортировки.</i>"
+    )
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+# --- Обработчик удаления сохранения ---
+async def delete_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    save_id = query.data.split('_')[2]
+    
+    if delete_user_save(user_id, save_id):
+        await query.answer("Сохранение удалено.")
+        # Обновляем меню
+        await load_menu_start(update, context)
+    else:
+        await query.answer("Ошибка удаления.", show_alert=True)
+
+# --- Обработчик загрузки сохранения ---
+async def load_game_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    save_id = query.data.split('_')[2]
+    
+    success, owner_id, story_id, fragment_id = load_save_to_settings(user_id, save_id)
+    
+    if success:
+        # Формируем callback "Продолжить"
+        play_callback = f"play_{owner_id}_{story_id}_{fragment_id}"
+        
+        keyboard = [[InlineKeyboardButton("▶️ Продолжить игру", callback_data=play_callback)]]
+
+        # NEW: отправляем новое сообщение вместо редактирования
+        await query.message.reply_text(
+            "✅ <b>Сохранение загружено!</b>\nНажмите кнопку ниже, чтобы продолжить.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+
+        # чтобы убрать "часики" на кнопке
+        await query.answer()
+        
+    else:
+        await query.answer("Не удалось загрузить сохранение.", show_alert=True)
+
+
+
+def perform_next_chapter_transition(user_id: int, current_story_id: str, next_story_id: str):
+    """
+    Переносит настройки пользователя (story_settings) из текущей истории/главы в новую.
+    При переносе fragment_id всегда сбрасывается на 'main_1'.
+    """
+    try:
+        source_path = f'story_settings/{current_story_id}/{user_id}'
+        target_path = f'story_settings/{next_story_id}/{user_id}'
+        
+        source_ref = db.reference(source_path)
+        data = source_ref.get()
+        
+        if data:
+            # --- Изменяем fragment_id на main_1 ---
+            data["fragment_id"] = "main_1"
+
+            # 1. Записываем изменённые данные в новую главу
+            target_ref = db.reference(target_path)
+            target_ref.set(data)
+            logger.info(
+                f"Данные перенесены из {current_story_id} в {next_story_id} "
+                f"для пользователя {user_id}, fragment_id → main_1"
+            )
+            
+            # 2. Очищаем старую
+            source_ref.delete()
+        else:
+            logger.info(f"Нет настроек для переноса из {current_story_id} для пользователя {user_id}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при переходе к следующей главе: {e}")
+
+#========================================================================
+
+
+
+
+
+
+
+
+
 
 def load_story_settings(inline_message_id: str) -> dict:
     """
@@ -2911,7 +3363,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 webapp_url = f"https://novel-qg4c.onrender.com/{user_id_str}"
                 keyboard = [
                     [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-                    [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
+                    [InlineKeyboardButton("🦊Создать/редактировать через web", url=webapp_url)],
+                    [InlineKeyboardButton("📂 Загрузить прохождение", callback_data='load_menu_start')], # <-- НОВАЯ КНОПКА    
+                    [InlineKeyboardButton("✧ 〰️〰️✦〰️〰️ ✧", callback_data='ignore')],                
                     [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
                     [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
                     [InlineKeyboardButton("📔Пройти обучение", callback_data='training_menu')],
@@ -2972,7 +3426,9 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     webapp_url = f"https://novel-qg4c.onrender.com/{user_id}"
     keyboard = [
         [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-        [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
+        [InlineKeyboardButton("🦊Создать/редактировать через web", url=webapp_url)],
+        [InlineKeyboardButton("📂 Загрузить прохождение", callback_data='load_menu_start')], # <-- НОВАЯ КНОПКА    
+        [InlineKeyboardButton("✧ 〰️〰️✦〰️〰️ ✧", callback_data='ignore')],                
         [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
         [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
         [InlineKeyboardButton("📔Пройти обучение", callback_data='training_menu')],
@@ -4675,6 +5131,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return None 
     elif data.startswith('view_stories_'):
         await view_stories_list(update, context)
+        return None 
+    elif data.startswith('manual_save_'):
+        await manual_save_callback(update, context)
         return None 
 
     elif data.startswith('dl_story_'):
@@ -10181,6 +10640,7 @@ async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE
         edit_steps_for_text=edit_steps
     )
 
+
 def normalize_fragments(fragments: Dict[str, Any]) -> Dict[str, Any]:
     normalized = {}
 
@@ -10374,7 +10834,49 @@ async def render_fragment(
             return
 
 
+    # --- ЛОГИКА ТЕГОВ СОХРАНЕНИЯ (ВСТАВИТЬ СЮДА) ---
+    is_checkpoint = False
+    is_manual_save_allowed = False
+    
+    # Переменные для следующей главы
+    next_chapter_id = None
+    next_chapter_button_text = "К следующей главе" # Текст по умолчанию
 
+    # Проверяем и чистим base_text_for_display
+    if base_text_for_display:
+        
+        # 1. Логика чекпоинта (ВАШ СТАРЫЙ КОД)
+        if "##-checkpoint-##" in base_text_for_display:
+            is_checkpoint = True
+            base_text_for_display = base_text_for_display.replace("##-checkpoint-##", "")
+
+        # 2. Логика ручного сохранения (ВАШ СТАРЫЙ КОД)
+        if "##-save-##" in base_text_for_display:
+            is_manual_save_allowed = True
+            base_text_for_display = base_text_for_display.replace("##-save-##", "")
+            
+        # 3. ЛОГИКА СЛЕДУЮЩЕЙ ГЛАВЫ (НОВЫЙ КОД)
+        # Ищем паттерн ##-nextchapter_{id}-## или ##-nextchapter_{id}(text)-##
+        # Регулярка захватывает ID (группа 1) и опциональный текст в скобках (группа 2)
+        next_chapter_pattern = r"##-nextchapter_([a-zA-Z0-9_-]+)(?:\((.+?)\))?-##"
+        match_next = re.search(next_chapter_pattern, base_text_for_display)
+        
+        if match_next:
+            next_chapter_id = match_next.group(1) # ID новой истории/главы
+            custom_text = match_next.group(2)     # Текст кнопки (если есть)
+            
+            if custom_text:
+                next_chapter_button_text = custom_text
+            
+            # Удаляем тег из текста
+            base_text_for_display = re.sub(next_chapter_pattern, "", base_text_for_display)
+            
+            # Запускаем фоновую задачу по переносу данных в базу
+            async def background_chapter_transition():
+                perform_next_chapter_transition(user_id, story_id, next_chapter_id)
+            
+            asyncio.create_task(background_chapter_transition())
+    # 2. Очищаем текст внутри шагов анимации (edit_steps), иначе теги вернутся при обновлении
 
 
     # --- Подготовка кнопок и оценка эффектов для отображения ---
@@ -10432,7 +10934,22 @@ async def render_fragment(
         inline_buttons.append([InlineKeyboardButton(button_display_text, callback_data=button_callback_data)])
         visible_button_count += 1
     
+    if is_manual_save_allowed:
+        # Добавляем отдельной строкой внизу
+        save_callback = f"manual_save_{owner_id}_{story_id}"
+        inline_buttons.append([InlineKeyboardButton("💾 Сохранить прогресс", callback_data=save_callback)])
+
+    # --- НОВЫЙ КОД ДЛЯ КНОПКИ ПЕРЕХОДА ---
+    if next_chapter_id:
+        # Формируем колбэк: play_{owner_id}_{new_story_id}_main_1
+        # Важно: owner_id берется из текущего контекста (автор), next_chapter_id - из тега
+        next_chap_callback = f"play_{owner_id}_{next_chapter_id}_main_912e"
+        
+        inline_buttons.append([InlineKeyboardButton(next_chapter_button_text, callback_data=next_chap_callback)])
+    # -------------------------------------
+
     reply_markup = InlineKeyboardMarkup(inline_buttons) if inline_buttons else None
+
 
     # --- Логика "тупика" ---
     # Используем временный список для частей текста, чтобы избежать частых конкатенаций строк
@@ -10676,8 +11193,9 @@ async def render_fragment(
         # Определяем, для какого сообщения и какой его части (текст/caption) запускать редактирование
         message_to_apply_timed_edits = first_media_message_for_caption_edit if first_media_message_for_caption_edit else newly_sent_message_object
 
-        if message_to_apply_timed_edits and edit_steps_for_text:
-            # Отменяем предыдущую задачу редактирования, если она была для этого ключа
+        if message_to_apply_timed_edits and edit_steps_for_text and len(edit_steps_for_text) > 1:
+            
+            # Отменяем предыдущую задачу...
             if edit_task_key in active_edit_tasks:
                 logger.info(f"render_fragment: Cancelling existing timed_edit task {edit_task_key} before starting new one.")
                 active_edit_tasks[edit_task_key].cancel()
@@ -10692,6 +11210,7 @@ async def render_fragment(
             # base_text_for_display уже является текстом без тегов [[...]]
             # run_timed_edits должен использовать его как основу
             text_for_timed_run = final_base_text_for_display
+            logger.info(f"final_base_text_for_display {final_base_text_for_display}")
 
             logger.info(f"Scheduling timed_edits for msg {message_to_apply_timed_edits.message_id} with key {edit_task_key}. is_caption={is_caption_edit}")
             active_edit_tasks[edit_task_key] = asyncio.create_task(
@@ -10721,6 +11240,18 @@ async def render_fragment(
             logger.error(f"Critical error: Failed to even send error message to user {user_id}: {ie}")
 
     context.user_data[last_messages_key] = final_message_ids_sent
+
+    # --- ЗАПУСК ЧЕКПОИНТА (ВСТАВИТЬ СЮДА) ---
+    if is_checkpoint:
+        # Получаем заголовок истории из story_data
+        current_story_title = story_data.get("title", "История")
+        
+        # Запускаем сохранение в фоне, чтобы не тормозить рендер
+        async def background_checkpoint():
+            perform_save(user_id, story_id, "checkpoint", str(owner_id), current_story_title)
+            
+        asyncio.create_task(background_checkpoint())
+
 
     # --- 5. Планирование авто-перехода ---
     auto_timer_key = f"{user_id}_{story_id}_{chat_id}" # Ключ для таймера авто-перехода
@@ -10903,6 +11434,12 @@ async def run_timed_edits_full(
             delay = step.get("delay", 0)
             text_to_send = step.get("full_text", "")
 
+            # Чистим от служебных маркеров
+            for tag in ("##-save-##", "##-checkpoint-##"):
+                text_to_send = text_to_send.replace(tag, "")
+
+            logger.info(f"text_to_send {text_to_send}")
+            logger.info(f"text_to_send {text_to_send}")
             # Защита от отправки пустого текста (Telegram не разрешает)
             if not text_to_send.strip():
                 text_to_send = " " # Невидимый пробел или просто пробел
@@ -11628,6 +12165,7 @@ def main() -> None:
             CallbackQueryHandler(view_stories_list, pattern="^view_neural_stories$"),
             CallbackQueryHandler(cancel_coop_add, pattern="^cancel_coop_add$"),
             CallbackQueryHandler(view_stories_list, pattern="^view_coop_stories$"),
+            CallbackQueryHandler(manual_save_callback, pattern=r'^manual_save_'),            
         ],
         allow_reentry=True
     )
@@ -11684,6 +12222,15 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(restart, pattern='^restart_callback$')) # <-- ДОБАВЛЕНО: Обработчик кнопки рестарта вне диалога
     application.add_handler(CallbackQueryHandler(start_interactive_training, pattern="interactive_training_start"))   
     # Запуск бота
+
+    # сейфлоад
+    application.add_handler(CallbackQueryHandler(load_menu_start, pattern=r'^load_menu_start$')) 
+    application.add_handler(CallbackQueryHandler(manual_save_callback, pattern=r'^manual_save_'))         
+    application.add_handler(CallbackQueryHandler(delete_save_callback, pattern=r'^del_save_'))      
+    application.add_handler(CallbackQueryHandler(load_game_callback, pattern=r'^load_game_')) 
+    application.add_handler(CallbackQueryHandler(load_menu_callback, pattern='^menu_'))
+
+    
     application.add_handler(CommandHandler("transfer", transfer_to_index))
     application.add_handler(CommandHandler("transapp", transfer_story_command))    
     application.add_handler(CallbackQueryHandler(handle_neuralstart_story_callback, pattern=r"^nstartstory_[\w\d]+_[\w\d]+$"))
@@ -11699,6 +12246,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
