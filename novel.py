@@ -7889,6 +7889,23 @@ async def add_content_callback_handler(update: Update, context: ContextTypes.DEF
 
 
 
+def smart_split(s: str) -> list[str]:
+    result = []
+    buf = ''
+    depth = 0
+    for char in s:
+        if char == '[':
+            depth += 1
+        elif char == ']':
+            depth -= 1
+        if char == ',' and depth == 0:
+            result.append(buf.strip())
+            buf = ''
+        else:
+            buf += char
+    if buf.strip():
+        result.append(buf.strip())
+    return result
 
 
 
@@ -7981,6 +7998,7 @@ def parse_effects_from_text(button_text: str) -> tuple[str, list[dict], list[str
         clean_text = clean_text.replace(full_tag, '').strip()
 
     return clean_text, effects, errors
+
 
 
 
@@ -11665,6 +11683,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
