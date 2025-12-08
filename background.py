@@ -230,22 +230,32 @@ def update_choice(user_id_str, story_id):
     from novel import load_all_user_stories, save_story_data
     data = request.get_json()
     source_id = data.get("source")
-    # Для идентификации choice нам нужен либо target, либо его индекс
-    choice_index = data.get("choiceIndex") 
+    
+    # Важно: приводим к int, так как JSON иногда может передать строку "1"
+    try:
+        choice_index = int(data.get("choiceIndex"))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Некорректный index"}), 400
+        
     new_text = data.get("text")
     new_effects = data.get("effects")
 
-    if source_id is None or choice_index is None:
-        return jsonify({"error": "Необходим source_id и choice_index"}), 400
+    if source_id is None:
+        return jsonify({"error": "Необходим source_id"}), 400
 
     all_stories = load_all_user_stories(user_id_str)
     story = all_stories.get(story_id)
-    if not story or source_id not in story["fragments"]:
+    if not story or "fragments" not in story or source_id not in story["fragments"]:
         return jsonify({"error": "Фрагмент не найден"}), 404
 
     source_fragment = story["fragments"][source_id]
+
+    # Проверка наличия списка choices и корректности индекса
+    # Если choices нет или индекс выходит за пределы длины списка
     if "choices" not in source_fragment or len(source_fragment["choices"]) <= choice_index:
-        return jsonify({"error": "Связь не найдена"}), 404
+        # ВОТ ЗДЕСЬ возникала ваша ошибка. 
+        # Это значит, что на сервере список короче, чем думает клиент.
+        return jsonify({"error": f"Связь не найдена (index {choice_index} out of bounds)"}), 404
 
     # Обновляем данные
     if new_text is not None:
@@ -254,8 +264,8 @@ def update_choice(user_id_str, story_id):
         source_fragment["choices"][choice_index]["effects"] = new_effects
 
     save_story_data(user_id_str, story_id, story)
-    # Возвращаем обновленный фрагмент, чтобы фронтенд мог обновить состояние
-    return jsonify({"status": "ok", "updatedFragment": source_fragment}) 
+
+    return jsonify({"status": "ok", "updatedFragment": source_fragment})
 
 # Эндпоинт для удаления choice (связи)
 @app.route('/api/story/<user_id_str>/<story_id>/choice', methods=['DELETE'])
