@@ -466,7 +466,6 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
 
 #=========================savegame=======================================
 
-import pytz
 ITEMS_PER_PAGE = 15
 
 
@@ -517,9 +516,7 @@ def perform_save(user_id: int, story_id: str, save_type: str, owner_id: str, sto
         slot_id = get_next_save_slot(user_id)
 
         # 3. Формируем данные сохранения
-        moscow_tz = pytz.timezone('Europe/Moscow')
-
-        current_time = datetime.datetime.now(moscow_tz).strftime("%d.%m.%Y %H:%M")
+        current_time = datetime.datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y %H:%M")
 
 
         save_data = {
@@ -12246,6 +12243,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
