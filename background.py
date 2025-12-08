@@ -581,11 +581,10 @@ def get_story_list(user_id_str):
     """
     Получает список историй (только метаданные) для пользователя.
     """
-    from novel import load_all_user_stories # Импортируем здесь, как в вашем коде
+    from novel import load_all_user_stories
     
     try:
         all_stories = load_all_user_stories(user_id_str)
-        # Форматируем в удобный для клиента список
         result = []
 
         for story_id, story_data in all_stories.items():
@@ -593,12 +592,16 @@ def get_story_list(user_id_str):
                 "id": story_id,
                 "title": story_data.get("title", "Без названия"),
                 "public": story_data.get("public", False),
-                "user_name": story_data.get("user_name", None)
+                "user_name": story_data.get("user_name", None),
+                # --- ДОБАВЛЯЕМ ВОТ ЭТУ СТРОКУ ---
+                "neural": story_data.get("neural", False) 
+                # --------------------------------
             })
 
         return jsonify(result)
     except Exception as e:
-        logger.info(f"Ошибка при получении списка историй для {user_id_str}: {e}")
+        # Лучше использовать logging вместо print/logger если не настроен, но оставим как было
+        print(f"Ошибка при получении списка историй для {user_id_str}: {e}")
         return jsonify({"error": "Не удалось загрузить список историй"}), 500
 
 import uuid # <-- 1. ДОБАВЬТЕ ЭТОТ ИМПОРТ
