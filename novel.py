@@ -3360,7 +3360,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 webapp_url = f"https://novel-qg4c.onrender.com/{user_id_str}"
                 keyboard = [
                     [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-                    [InlineKeyboardButton("🦊Создать/редактировать через web", url=webapp_url)],
+                    [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
                     [InlineKeyboardButton("📂 Загрузить прохождение", callback_data='load_menu_start')], # <-- НОВАЯ КНОПКА    
                     [InlineKeyboardButton("✧ 〰️〰️✦〰️〰️ ✧", callback_data='ignore')],                
                     [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
@@ -3423,7 +3423,7 @@ async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     webapp_url = f"https://novel-qg4c.onrender.com/{user_id}"
     keyboard = [
         [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-        [InlineKeyboardButton("🦊Создать/редактировать через web", url=webapp_url)],
+        [InlineKeyboardButton("🦊Создать/редактировать через web", web_app=WebAppInfo(url=webapp_url))],
         [InlineKeyboardButton("📂 Загрузить прохождение", callback_data='load_menu_start')], # <-- НОВАЯ КНОПКА    
         [InlineKeyboardButton("✧ 〰️〰️✦〰️〰️ ✧", callback_data='ignore')],                
         [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
@@ -12243,6 +12243,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
