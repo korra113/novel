@@ -92,8 +92,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING) # Уменьшает спа
 logger = logging.getLogger(__name__)
 
 # --- Константы ---
-BOT_TOKEN = "7553491252:AAFwKa2WzZ6wKMVUIGt18oxCGPNqvSo5oRA"  # <-- ЗАМЕНИ НА СВОЙ ТОКЕН БОТА
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
+if not BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в переменных окружения")
 def init_firebase():
     """
     Инициализирует приложение Firebase, если оно еще не было инициализировано.
@@ -12243,6 +12245,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
