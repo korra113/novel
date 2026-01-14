@@ -7,7 +7,10 @@ import logging
 
 # --- КОНФИГУРАЦИЯ ---
 BUILD_FOLDER = os.path.join(os.path.dirname(__file__), 'client', 'build')
-TELEGRAM_BOT_TOKEN = "7553491252:AAFwKa2WzZ6wKMVUIGt18oxCGPNqvSo5oRA"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в переменных окружения")
 
 app = Flask(__name__, static_folder=BUILD_FOLDER, static_url_path='')
 logging.getLogger("httpx").setLevel(logging.WARNING) # Уменьшает спам от http запросов
