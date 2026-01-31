@@ -153,6 +153,9 @@ MEDIA_TYPES = {"photo", "video", "animation", "audio"}
 ADMIN_USER_ID = 6217936347
 logger = logging.getLogger(__name__)
 
+
+
+
 async def delete_inline_stories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("У вас нет прав на выполнение этой команды.")
@@ -466,11 +469,550 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
+
+
+
+import requests
+import hashlib  # <--- Добавляем для хеширования
+#=========================HTML=======================================
+BASE_FILE_DIR = "files"  # Папка в корне проекта
+
+def ensure_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+
+def calculate_file_hash(file_path, chunk_size=8192):
+    """Считает SHA-256 хеш файла."""
+    sha256 = hashlib.sha256()
+    try:
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(chunk_size):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+    except OSError:
+        return None
+
+def find_duplicate_in_folder(new_file_path, target_folder):
+    """
+    Ищет файл в папке target_folder, идентичный new_file_path.
+    Сначала проверяет размер, потом хеш.
+    Возвращает путь к существующему файлу или None.
+    """
+    if not os.path.exists(target_folder):
+        return None
+
+    new_size = os.path.getsize(new_file_path)
+    new_hash = None # Посчитаем лениво, только если найдем файл с таким же размером
+
+    for filename in os.listdir(target_folder):
+        existing_path = os.path.join(target_folder, filename)
+        
+        # Пропускаем сам себя (если вдруг) и директории
+        if existing_path == new_file_path or not os.path.isfile(existing_path):
+            continue
+
+        # 1. Оптимизация: Сравнение размера (мгновенно)
+        try:
+            if os.path.getsize(existing_path) != new_size:
+                continue
+        except OSError:
+            continue
+
+        # 2. Если размер совпал — считаем хеши
+        if new_hash is None:
+            new_hash = calculate_file_hash(new_file_path)
+        
+        existing_hash = calculate_file_hash(existing_path)
+
+        if new_hash == existing_hash:
+            return existing_path  # Дубликат найден!
+
+    return None
+
+
+# Маппинг типов Telegram -> Системные папки файлового менеджера
+TYPE_TO_SYS_FOLDER = {
+    "photo": "sys_backgrounds",
+    "image": "sys_backgrounds",    # Добавлено
+    "video": "sys_videos",         # Лучше отделить видео от фонов
+    "animation": "sys_backgrounds", 
+    "document": "sys_objects",     # Документы часто объекты или текстуры
+    "audio": "sys_audio",
+    "voice": "sys_audio",
+    "font": "sys_fonts"            # Если будете грузить шрифты
+}
+
+
+# novel.py
+def download_file_from_telegram(file_id, media_type, story_id, target_folder_name=None, extension=None):
+    if not target_folder_name:
+        target_folder_name = TYPE_TO_SYS_FOLDER.get(media_type, media_type)
+
+    save_dir = os.path.join(BASE_FILE_DIR, story_id, target_folder_name)
+    ensure_dir(save_dir)
+
+    # 1. Получаем путь от API
+    get_file_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+    try:
+        r = requests.get(get_file_url, timeout=10)
+        res = r.json()
+        if not res.get("ok"):
+            logger.error(f"Telegram API error for {file_id}: {res}")
+            return None
+        
+        file_path_remote = res["result"]["file_path"]
+        
+        # Определяем расширение
+        if extension:
+            ext = extension if extension.startswith('.') else f'.{extension}'
+        else:
+            ext = os.path.splitext(file_path_remote)[1]
+            
+            # --- ХАК ДЛЯ GIF: Восстанавливаем расширение ---
+            if ext == '.gif_raw':
+                ext = '.gif'
+            # -----------------------------------------------
+
+            if not ext:
+                if media_type == 'photo': ext = '.jpg'
+                elif media_type in ['video', 'animation']: ext = '.mp4'
+                elif media_type == 'audio': ext = '.mp3'
+                elif media_type == 'voice': ext = '.ogg'
+        
+        # Итоговое имя файла, которое ожидает БД
+        final_filename = f"{file_id}{ext}"
+        final_path = os.path.join(save_dir, final_filename)
+        
+        # Путь для веба
+        relative_web_path = f"/files/{story_id}/{target_folder_name}/{final_filename}"
+
+        # --- ПРОВЕРКА 1: Если файл с таким именем уже есть, сразу возвращаем его ---
+        if os.path.exists(final_path):
+            return relative_web_path
+
+        # --- СКАЧИВАНИЕ ---
+        # Скачиваем сразу во временный файл
+        temp_filename = f"temp_{file_id}{ext}"
+        temp_path = os.path.join(save_dir, temp_filename)
+
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path_remote}"
+        file_content = requests.get(download_url, timeout=30).content
+        
+        with open(temp_path, "wb") as f:
+            f.write(file_content)
+
+        if os.path.exists(final_path):
+            os.remove(final_path) 
+            
+        os.rename(temp_path, final_path)
+        return relative_web_path
+
+    except Exception as e:
+        logger.error(f"Exception downloading {file_id}: {e}")
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            os.remove(temp_path)
+        return None
+        
+def init_html_export_settings(user_id, story_id, story_data):
+    """
+    Создает структуру в users_story/HTMLexport, скачивает файлы.
+    Реализует полную защиту от дубликатов (физических и логических).
+    """
+    export_ref = db.reference(f'HTMLexport/{user_id}/{story_id}')
+    current_export_data = export_ref.get() or {}
+
+    # --- 1. Инициализация глобальных настроек ---
+    if "global_settings" not in current_export_data:
+        current_export_data["global_settings"] = {
+            "background_color": "#000000",
+            "font_family": "Arial",
+            "music_volume": 0.5
+        }
+
+    # --- 2. Инициализация структуры папок Assets ---
+    # Используем системные папки (как в FileManager.js)
+    system_folders = ["sys_backgrounds", "sys_audio", "sys_videos", "sys_objects", "sys_textures"]
+    
+    if "assets" not in current_export_data:
+        current_export_data["assets"] = {}
+    
+    for folder in system_folders:
+        if folder not in current_export_data["assets"]:
+            # Имя для отображения
+            pretty_name = folder.replace("sys_", "").capitalize()
+            current_export_data["assets"][folder] = {"name": pretty_name, "files": []}
+
+    # --- 3. Подготовка кеша существующих файлов ---
+    # existing_assets_ids: чтобы не обрабатывать один и тот же file_id дважды
+    # path_to_asset_entry: чтобы понять, есть ли уже актив с таким локальным путем (для дублей контента)
+    
+    existing_assets_ids = set()
+    path_to_asset_entry = {}
+    
+    # Счетчики имен (background_1, audio_2...)
+    file_counters = {
+        "sys_backgrounds": 1,
+        "sys_audio": 1,
+        "sys_videos": 1,
+        # Остальные по необходимости
+    }
+
+    # Проходим по всем папкам и заполняем кеши
+    for folder_key, folder_data in current_export_data["assets"].items():
+        # Если папка - это словарь с ключом files (новая структура)
+        files_list = []
+        if isinstance(folder_data, dict) and 'files' in folder_data:
+            files_list = folder_data['files']
+        elif isinstance(folder_data, list): # Старая структура (на всякий случай)
+            files_list = folder_data
+        
+        # Обновляем счетчик на основе количества файлов
+        if folder_key in file_counters:
+             file_counters[folder_key] = len(files_list) + 1
+
+        for asset in files_list:
+            if 'file_id' in asset:
+                existing_assets_ids.add(asset['file_id'])
+            if 'local_path' in asset:
+                path_to_asset_entry[asset['local_path']] = asset
+
+    # --- 4. Обработка фрагментов истории ---
+    if "fragments" not in current_export_data:
+        current_export_data["fragments"] = {}
+
+    fragments = story_data.get("fragments", {})
+
+    for frag_id, frag_val in fragments.items():
+        # Инициализация фрагмента в экспорте
+        if frag_id not in current_export_data["fragments"]:
+            current_export_data["fragments"][frag_id] = {
+                "bg_image": None, 
+                "bg_music": None,
+                "visual_elements": [] 
+            }
+        
+        media_list = frag_val.get("media", [])
+        
+        for m in media_list:
+            fid = m.get("file_id")
+            mtype = m.get("type") # photo, video, animation, audio, voice
+            
+            if not fid: 
+                continue
+
+            # 4.1. СКАЧИВАНИЕ / ПОЛУЧЕНИЕ ПУТИ
+            # Функция download_file_from_telegram вернет путь к старому файлу, 
+            # если найдет дубликат по хешу.
+            local_path = download_file_from_telegram(fid, mtype, story_id)
+            
+            if not local_path:
+                continue
+
+            # 4.2. ЛОГИЧЕСКАЯ ДЕДУПЛИКАЦИЯ
+            # Проверяем, зарегистрирован ли уже этот ПУТЬ как актив
+            
+            # Определяем категорию
+            target_cat = "sys_backgrounds"
+            name_prefix = "background"
+
+            if mtype in ["audio", "voice"]: 
+                target_cat = "sys_audio"
+                name_prefix = "audio"
+            elif mtype in ["video", "animation"]: 
+                target_cat = "sys_videos" # или sys_backgrounds, если используете видео как фон
+                name_prefix = "video"
+
+            # Ссылка на текущий список файлов
+            if target_cat not in current_export_data["assets"]:
+                 current_export_data["assets"][target_cat] = {"name": target_cat, "files": []}
+            
+            asset_container = current_export_data["assets"][target_cat]["files"]
+
+            # ПРОВЕРКА: Есть ли этот путь уже в базе?
+            if local_path in path_to_asset_entry:
+                # Файл уже есть в менеджере (возможно под другим file_id, но контент тот же)
+                # Мы ничего не добавляем в assets, просто используем путь
+                pass 
+            else:
+                # Файла нет в менеджере -> Создаем новую запись
+                
+                # Генерируем имя
+                current_number = file_counters.get(target_cat, 1)
+                pretty_name = f"{name_prefix}_{current_number}"
+                
+                new_entry = {
+                    "file_id": fid,
+                    "local_path": local_path,
+                    "original_type": mtype,
+                    "name": pretty_name 
+                }
+                
+                # Добавляем в список
+                asset_container.append(new_entry)
+                
+                # Обновляем индексы
+                path_to_asset_entry[local_path] = new_entry
+                existing_assets_ids.add(fid)
+                if target_cat in file_counters:
+                    file_counters[target_cat] += 1
+
+            # 4.3. АВТО-НАЗНАЧЕНИЕ ФОНА ВО ФРАГМЕНТЕ
+            if mtype == 'photo' or (mtype == 'video' and target_cat == "sys_backgrounds"):
+                # Если у фрагмента еще нет фона, ставим этот
+                if not current_export_data["fragments"][frag_id].get("bg_image"):
+                    current_export_data["fragments"][frag_id]["bg_image"] = local_path
+
+    # --- 5. Сохранение ---
+    export_ref.set(current_export_data)
+
+    return current_export_data
+
+def load_html_export_settings(user_id: str, story_id: str):
+    """Загружает настройки экспорта (HTMLexport)."""
+    ref = db.reference(f'HTMLexport/{user_id}/{story_id}')
+    return ref.get() or {}
+
+
+def save_html_export_settings(user_id: str, story_id: str, data: dict):
+    """Сохраняет настройки экспорта."""
+    ref = db.reference(f'HTMLexport/{user_id}/{story_id}')
+    ref.update(data)
+    return True
+DISPLAY_NAME_TO_SYS_FOLDER = {
+    'Backgrounds': 'sys_backgrounds',
+    'Characters': 'sys_characters',
+    'Textures': 'sys_textures',
+    'Objects': 'sys_objects',
+    'Audio': 'sys_audio',
+    'Videos': 'sys_videos' 
+}
+
+
+def check_and_download_recursive(nodes, story_id, assets_map, updated_export_flag, current_folder_path):
+    """
+    Универсальный рекурсивный обход.
+    current_folder_path: текущий путь (например, "sys_backgrounds" или "sys_backgrounds/Nature")
+    """
+    has_changes = False
+
+    if not nodes:
+        return has_changes, assets_map
+
+    # Если nodes это словарь (например, пресеты: {"Happy": [layers...]})
+    if isinstance(nodes, dict):
+        for key, layer_list in nodes.items():
+            # Пресеты лежат внутри папки персонажа, путь не меняем или добавляем контекст
+            changed, assets_map = check_and_download_recursive(
+                layer_list, story_id, assets_map, updated_export_flag, current_folder_path
+            )
+            if changed: has_changes = True
+        return has_changes, assets_map
+
+    # Если nodes это список (слои, файлы или папки)
+    if isinstance(nodes, list):
+        for node in nodes:
+            if not node:
+                continue
+
+            # === ВЛОЖЕННЫЙ СПИСОК ===
+            if isinstance(node, list):
+                changed, assets_map = check_and_download_recursive(
+                    node, story_id, assets_map, updated_export_flag, current_folder_path
+                )
+                if changed:
+                    has_changes = True
+                continue
+
+            # === ЗАЩИТА ОТ МУСОРА ===
+            if not isinstance(node, dict):
+                continue
+
+            node_type = node.get('type')
+            
+            # Если это папка (обычная или персонажа), ныряем внутрь
+            if node_type in ['folder', 'character_folder']:
+                folder_name = node.get('name', 'Unknown')
+                # Формируем путь для вложенной папки: "sys_backgrounds/Nature"
+                next_folder_path = f"{current_folder_path}/{folder_name}"
+                
+                # Проверяем файлы внутри папки
+                children = node.get('files') or node.get('children')
+                if children:
+                    changed, assets_map = check_and_download_recursive(
+                        children, story_id, assets_map, updated_export_flag, next_folder_path
+                    )
+                    if changed: has_changes = True
+                
+                # Если у папки есть пресеты (для персонажей)
+                presets = node.get('presets')
+                if presets:
+                    changed, assets_map = check_and_download_recursive(
+                        presets, story_id, assets_map, updated_export_flag, next_folder_path
+                    )
+                    if changed: has_changes = True
+                
+                # Саму папку скачивать не нужно, идем дальше
+                continue
+
+            # === ОБРАБОТКА ФАЙЛА ===
+            if 'file_id' in node:
+                fid = node['file_id']
+                local_path = node.get('local_path')
+                extension = node.get('extension')
+                
+                # Определяем, нужно ли качать
+                needs_download = False
+                if not local_path:
+                    needs_download = True
+                else:
+                    # Чистим путь для проверки
+                    clean_rel_path = local_path.lstrip('/')
+                    if not os.path.exists(clean_rel_path):
+                        needs_download = True
+
+                if needs_download:
+                    print(f"[Sync] Missing file '{node.get('name')}' in '{current_folder_path}'. Downloading {fid}...")
+                    
+                    # Скачиваем в текущую вложенную папку (current_folder_path)
+                    new_path = download_file_from_telegram(
+                        fid, 
+                        node_type if node_type else 'document', 
+                        story_id, 
+                        target_folder_name=current_folder_path, # <--- СЮДА ПЕРЕДАЕМ ПУТЬ С ПОДПАПКАМИ
+                        extension=extension
+                    )
+
+                    if new_path:
+                        node['local_path'] = new_path
+                        assets_map[fid] = new_path
+                        
+                        # === ИСПРАВЛЕНИЕ START ===
+                        # Не перезаписываем src, если там уже лежит внешняя ссылка (Catbox)
+                        current_src = node.get('src', '')
+                        if not current_src.startswith('http'):
+                             node['src'] = new_path 
+                        # === ИСПРАВЛЕНИЕ END ===
+                        
+                        has_changes = True
+                    else:
+                        print(f"[Sync] Failed to download {fid}")
+                else:
+                    assets_map[fid] = local_path
+
+    return has_changes, assets_map
+
+
+def ensure_assets_exist(user_id, story_id, story_data, export_data):
+    """
+    Проверяет физическое наличие файлов, восстанавливая структуру папок.
+    """
+    updated_export = False
+    assets_map = {} 
+
+    if "assets" not in export_data:
+        export_data["assets"] = {}
+        updated_export = True
+
+    # 1. ОБРАБОТКА ВСЕХ ПАПОК ЧЕРЕЗ РЕКУРСИЮ
+    for folder_key, folder_content in export_data["assets"].items():
+        # Получаем список файлов
+        files_list = []
+        if isinstance(folder_content, dict) and 'files' in folder_content:
+            files_list = folder_content['files']
+        elif isinstance(folder_content, list):
+            # Если старая структура (просто массив), приводим к объекту
+            folder_pretty_name = folder_key.replace("sys_", "").capitalize()
+            export_data["assets"][folder_key] = {"name": folder_pretty_name, "files": folder_content}
+            files_list = folder_content
+            updated_export = True
+        
+        # Запускаем рекурсию для ЭТОЙ корневой папки (sys_backgrounds, sys_characters и т.д.)
+        # folder_key уже содержит правильное имя (например, 'sys_backgrounds')
+        changed, assets_map = check_and_download_recursive(
+            files_list, 
+            story_id, 
+            assets_map, 
+            updated_export, 
+            current_folder_path=folder_key # Начинаем путь от корня системной папки
+        )
+        
+        if changed:
+            updated_export = True
+
+    # 2. ПРОВЕРКА НОВЫХ МЕДИА ИЗ ИСТОРИИ (Блок без изменений)
+    existing_file_ids = set(assets_map.keys())
+    fragments = story_data.get("fragments", {})
+
+    for frag_id, frag_val in fragments.items():
+        media_list = frag_val.get("media", [])
+        for m in media_list:
+            fid = m.get("file_id")
+            mtype = m.get("type") 
+            
+            if fid and fid not in existing_file_ids:
+                # Дефолтная папка, если тип не найден
+                target_folder = TYPE_TO_SYS_FOLDER.get(mtype, "sys_backgrounds")
+                
+                print(f"[Sync] New media found in story: {fid}. Downloading...")
+                
+                new_path = download_file_from_telegram(fid, mtype, story_id, target_folder)
+
+                if new_path:
+                    assets_map[fid] = new_path
+                    existing_file_ids.add(fid)
+                    
+                    if target_folder not in export_data["assets"]:
+                        export_data["assets"][target_folder] = {
+                            "name": "Assets",
+                            "files": []
+                        }
+                        updated_export = True
+                    else:
+                        # Папка есть, но структура может быть битой
+                        if "files" not in export_data["assets"][target_folder]:
+                            export_data["assets"][target_folder]["files"] = []
+                            updated_export = True
+
+
+                    new_asset_entry = {
+                        "file_id": fid,
+                        "local_path": new_path,
+                        "name": f"{mtype}_{fid[:5]}",
+                        "type": mtype,
+                        "original_type": mtype
+                    }
+                    
+                    # Добавляем в корень соответствующей папки (без вложенности)
+                    files_container = export_data["assets"][target_folder]["files"]
+                    
+                    # ИСПРАВЛЕНИЕ: Используем .get() и проверяем, что f — это словарь
+                    is_already_there = False
+                    for f in files_container:
+                        if isinstance(f, dict) and f.get('file_id') == fid:
+                            is_already_there = True
+                            break
+                    
+                    if not is_already_there:
+                        files_container.append(new_asset_entry)
+                        updated_export = True
+
+    if updated_export:
+        save_html_export_settings(user_id, story_id, export_data)
+
+    return assets_map, export_data
+
+
+
+
+
+
+
 #=========================savegame=======================================
 
-ITEMS_PER_PAGE = 15
 from zoneinfo import ZoneInfo
-
+ITEMS_PER_PAGE = 15
 
 def get_next_save_slot(user_id: int) -> int:
     """Находит ближайший свободный слот для сохранения, начиная с 1."""
@@ -1449,6 +1991,7 @@ def _save_story_state_to_firebase_sync(inline_message_id: str, story_state_data:
     ref.set(story_state_data)
 
 
+
 # 2. Создаем новую асинхронную функцию-обертку
 async def save_story_state_to_firebase(inline_message_id: str, story_state_data: dict):
     """
@@ -1480,6 +2023,7 @@ def update_user_attributes(inline_message_id: str, user_attributes: dict):
         ref.set(user_attributes)
     except Exception as e:
         logger.error(f"Failed to update user_attributes for {inline_message_id}: {e}")
+
 
 def save_story_data_to_file(all_data: dict) -> bool:
     """
@@ -2059,89 +2603,89 @@ def clean_caption(text: str) -> str:
 
 def advanced_replace_attributes(text: str, group_attributes: dict) -> str:
     """
-    Продвинутая версия replace_attributes_in_text.
-    
+    Продвинутая версия подстановки атрибутов.
+
     Работает:
-    - {{сила}} → подставляет МАКС значение среди всех игроков
+    - {{{сила}}} → подставляет МАКС значение среди всех игроков
     - {{сила: >6}}текст{{сила}} → показывает текст если атрибут удовлетворён
     - диапазоны {{удача: 3-8}}
     - HTML-escape (&gt; &lt;)
     - нечувствителен к регистру
     """
+    import random
     from html import unescape
+    import re
 
-    # --- 1. Нормализуем имена атрибутов ---
-    # ПРОСТОЙ режим: group_attributes = {"сила": 5, "удача": 3}
+    # --- 1. Нормализация атрибутов ---
     normalized = {}
     for k, v in group_attributes.items():
-        k2 = k.strip().lower()
-        normalized.setdefault(k2, []).append(v)
+        key = str(k).strip().lower()
+        normalized.setdefault(key, []).append(v)
 
-    # Теперь normalized = {"сила": [5,7], "удача":[3]}
+    def get_max_value(attr: str):
+        values = normalized.get(attr.lower())
+        return max(values) if values else None
 
-    def get_max_value(attr):
-        arr = normalized.get(attr.lower())
-        if not arr:
-            return None
-        return max(arr)
-
-    # --- 2. Снимаем HTML экранирование внутри {{...}} ---
+    # --- 2. HTML-unescape внутри {{...}} и {{{...}}} ---
     def html_unescape_inside(match):
-        inner = unescape(match.group(1))
-        return "{{" + inner + "}}"
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        inner = unescape(inner)
+        # сохраняем тип скобок
+        return "{{{" + inner + "}}}" if match.group(1) else "{{" + inner + "}}"
 
-    text = re.sub(r"\{\{(.*?)\}\}", html_unescape_inside, text, flags=re.DOTALL)
+    text = re.sub(
+        r"\{\{\{(.*?)\}\}\}|\{\{(.*?)\}\}",
+        html_unescape_inside,
+        text,
+        flags=re.DOTALL
+    )
 
-    # --- 3. Логические блоки ---
-    # {{стат: >6}}текст{{стат}}
+    # --- 3. Логические блоки {{атрибут:>6}}...{{атрибут}} ---
+    ATTR_PATTERN = r"[а-яА-ЯёЁa-zA-Z_]+"  # универсальный шаблон для имени атрибута
+
     logic_pattern = re.compile(
-        r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*:\s*([<>=])\s*(\d+)(?:\s*-\s*(\d+))?\s*\}\}(.*?)\{\{\s*\1\s*\}\}",
+        rf"\{{\{{\s*({ATTR_PATTERN})\s*:\s*([<>=])\s*(\d+)"
+        rf"(?:\s*-\s*(\d+))?\s*\}}\}}(.*?)\{{\{{\s*\1\s*\}}\}}",
         re.DOTALL | re.IGNORECASE
     )
 
     def logic_replacer(match):
-        attr = match.group(1).strip().lower()
-        op   = match.group(2)
+        attr_raw = match.group(1)
+        attr = attr_raw.strip().lower()
+        op = match.group(2)
         num1 = int(match.group(3))
         num2 = match.group(4)
         inside_text = match.group(5)
 
         current_value = get_max_value(attr)
         if current_value is None:
-            return ""  # нет атрибута вообще
+            return ""
 
-        # диапазон
-        if num2:
-            check_num = random.randint(min(num1, int(num2)), max(num1, int(num2)))
-        else:
-            check_num = num1
+        check_num = random.randint(min(num1, int(num2)), max(num1, int(num2))) if num2 else num1
 
-        # проверка условия
         if op == ">":
             ok = current_value > check_num
         elif op == "<":
             ok = current_value < check_num
-        else:
+        else:  # "="
             ok = current_value == check_num
 
         return inside_text if ok else ""
 
     text = re.sub(logic_pattern, logic_replacer, text)
 
-    # --- 4. Простые {{атрибут}} ---
-    def simple_replacer(match):
-        key = match.group(1).strip().lower()
+    # --- 4. Простые подстановки {{{атрибут}}} ---
+    triple_pattern = re.compile(rf"\{{\{{\{{\s*({ATTR_PATTERN})\s*\}}\}}\}}")
 
-        # если это логическая конструкция — пропускаем
-        if re.search(r"[:<>=\-]", key):
-            return "{{" + key + "}}"
+    def triple_replacer(match):
+        attr_raw = match.group(1)
+        attr = attr_raw.strip().lower()
+        value = get_max_value(attr)
+        return str(value) if value is not None else f"({attr_raw}: нет данных)"
 
-        v = get_max_value(key)
-        return str(v) if v is not None else f"({key}: нет данных)"
+    text = re.sub(triple_pattern, triple_replacer, text)
 
-    text = re.sub(r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*\}\}", simple_replacer, text)
-
-    # --- 5. Если ничего не осталось ---
+    # --- 5. Если результат пуст ---
     if not text.strip():
         return "Нет текста для отображения — условия не выполнены."
 
@@ -2183,7 +2727,6 @@ def deserialize_votes_from_db(votes_data) -> dict:
         return clean_votes
 
     return {}
-
 
 async def display_fragment_for_interaction(context: CallbackContext, inline_message_id: str, target_user_id_str: str, story_id: str, fragment_id: str):
     """
@@ -2485,6 +3028,7 @@ async def display_fragment_for_interaction(context: CallbackContext, inline_mess
         msg_cache[f"{inline_message_id}_media"] = media_id
     except Exception as e:
         logger.error(f"{log_prefix} КРИТИЧЕСКАЯ ОШИБКА при обновлении сообщения: {e}")
+
 
 
 
@@ -8530,6 +9074,7 @@ def describe_effects_from_button_text(button_text: str) -> List[str]:
 
     return effects
 
+
 def escape_markdown(text: str) -> str:
     """
     Экранирует специальные символы Markdown для безопасного отображения текста.
@@ -10187,10 +10732,18 @@ async def process_choice_effects_on_click(
     success_alert_parts = []
 
     for effect in effects_list:
-        stat_name = effect.get("stat")
-        if stat_name:
-            stat_name = stat_name.lower()
 
+
+
+
+
+        original_stat_name = effect.get("stat")
+        
+        # 2. Создаем версию в нижнем регистре для расчетов и логики
+        stat_name = None
+        if original_stat_name:
+            stat_name = original_stat_name.lower()
+        logger.info(f"stat_name-------===============---'{stat_name}' --------.")
         value_str = effect.get("value", "")
         hide_effect = effect.get("hide", False)
         
@@ -10217,7 +10770,7 @@ async def process_choice_effects_on_click(
 
         # Получаем текущее значение стата, учитывая изменения от предыдущих эффектов
         current_stat_val_for_effect = temp_effects_data.get(stat_name)
-
+        logger.info(f"scurrent_stat_val_for_effect'{current_stat_val_for_effect}' --------.")
         # Шаг 3: Используем существующую логику с финальными значениями
         if final_action_type == "check":
             val_for_check = 0
@@ -10237,7 +10790,10 @@ async def process_choice_effects_on_click(
                 if hide_effect:
                     return False, "", True
                 else:
-                    reason = f"Требование: {stat_name} {op_char}{final_numeric_val} (тек: {val_for_check})"
+                    reason = f"Требование: {original_stat_name} {op_char}{final_numeric_val} (тек: {val_for_check})"
+                    temp_effects_data[stat_name] = final_numeric_val
+                    user_progress["current_effects"] = temp_effects_data
+                    save_user_story_progress(story_id, user_id, user_progress)                     
                     if len(reason) > MAX_ALERT_LENGTH: reason = reason[:MAX_ALERT_LENGTH-3]+"..."
                     await query.answer(text=reason, show_alert=True)
                     return False, "", False
@@ -10247,7 +10803,7 @@ async def process_choice_effects_on_click(
             user_progress["current_effects"] = temp_effects_data
             save_user_story_progress(story_id, user_id, user_progress)            
             if not hide_effect:
-                success_alert_parts.append(f"▫️Ваш атрибут {stat_name} установлен на: {final_numeric_val}")
+                success_alert_parts.append(f"▫️Ваш атрибут {original_stat_name} установлен на: {final_numeric_val}")
         
         elif final_action_type == "modify":
             base_for_modification = 0
@@ -10255,7 +10811,7 @@ async def process_choice_effects_on_click(
                 try:
                     base_for_modification = int(current_stat_val_for_effect)
                 except (ValueError, TypeError):
-                    logger.warning(f"Стат {stat_name} имеет нечисловое значение '{current_stat_val_for_effect}'. Используется 0 как база для модификации.")
+                    logger.info(f"Стат {stat_name} имеет нечисловое значение '{current_stat_val_for_effect}'. Используется 0 как база для модификации.")
                     base_for_modification = 0
             
             new_val = (base_for_modification + final_numeric_val) if op_char == '+' else (base_for_modification - final_numeric_val)
@@ -10265,7 +10821,7 @@ async def process_choice_effects_on_click(
             
             if not hide_effect:
                 action_word = "увеличен" if op_char == '+' else "уменьшен"
-                success_alert_parts.append(f"▫️Ваш атрибут {stat_name} {action_word} на {abs(final_numeric_val)}")
+                success_alert_parts.append(f"▫️Ваш атрибут {original_stat_name} {action_word} на {abs(final_numeric_val)}")
 
     # Сохраняем все накопленные изменения в конце
     user_progress["current_effects"] = temp_effects_data
@@ -10278,7 +10834,6 @@ async def process_choice_effects_on_click(
             alert_text = alert_text[:MAX_ALERT_LENGTH-3] + "..."
     
     return True, alert_text, False
-
 
 
 
@@ -10335,40 +10890,56 @@ def evaluate_choice_for_display(
 
 def apply_effect_values(base_text, effects_dict):
     """
-    Подставляет значения атрибутов и обрабатывает логические блоки вида {{сила:>2}}...{{сила}},
-    включая случай, когда в тексте сохранены HTML-экранированные символы (&gt;, &lt;).
-    Нечувствительно к регистру и лишним пробелам.
+    Подставляет значения атрибутов и обрабатывает логические блоки вида
+    {{сила:>2}}...{{сила}}.
+
+    Простые подстановки выполняются ТОЛЬКО через {{{сила}}}.
+    Нечувствительно к регистру ({{{СИЛА}}} == сила).
+    Поддерживает HTML-экранированные символы (&gt;, &lt;).
     """
     logger.info(f"base_text: {base_text}")
     logger.info(f"effects_dict: {effects_dict}")
+
     text = base_text
 
-    # --- 0. Подготовим нормализованный словарь атрибутов ---
-    # Все ключи приводим к нижнему регистру и убираем пробелы
+    # --- 0. Нормализация атрибутов ---
     normalized_effects = {
-        k.strip().lower(): v for k, v in effects_dict.items()
+        str(k).strip().lower(): v
+        for k, v in effects_dict.items()
     }
 
-    # --- 1. Декодируем HTML внутри {{...}} ---
+    # --- 1. HTML-декодирование внутри {{...}} и {{{...}}} ---
     def html_unescape_inside_braces(match):
-        inner = match.group(1)
-        inner_unescaped = (inner
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+
+        inner = (inner
             .replace("&gt;", ">")
             .replace("&lt;", "<")
             .replace("&amp;", "&")
         )
-        return "{{" + inner_unescaped + "}}"
 
-    text = re.sub(r"\{\{(.*?)\}\}", html_unescape_inside_braces, text, flags=re.DOTALL)
+        if match.group(1) is not None:
+            return "{{{" + inner + "}}}"
+        else:
+            return "{{" + inner + "}}"
 
-    # --- 2. Логические блоки {{атрибут:операторчисло(-число)}}...{{атрибут}} ---
+    text = re.sub(
+        r"\{\{\{(.*?)\}\}\}|\{\{(.*?)\}\}",
+        html_unescape_inside_braces,
+        text,
+        flags=re.DOTALL
+    )
+
+    # --- 2. Логические блоки {{атрибут:>2}}...{{атрибут}} ---
     logic_pattern = re.compile(
-        r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*:\s*([<>=])\s*(\d+)(?:\s*-\s*(\d+))?\s*\}\}(.*?)\{\{\s*\1\s*\}\}",
+        r"\{\{\s*([а-яА-ЯёЁa-zA-Z_]+)\s*:\s*([<>=])\s*(\d+)"
+        r"(?:\s*-\s*(\d+))?\s*\}\}(.*?)\{\{\s*\1\s*\}\}",
         re.DOTALL | re.IGNORECASE
     )
 
     def logic_replacer(match):
-        attr = match.group(1).strip().lower()
+        attr_raw = match.group(1)
+        attr = attr_raw.strip().lower()
         op = match.group(2)
         num1 = int(match.group(3))
         num2 = match.group(4)
@@ -10376,16 +10947,14 @@ def apply_effect_values(base_text, effects_dict):
 
         value = normalized_effects.get(attr)
         if value is None:
-            logger.debug(f"Нет значения для '{attr}' — блок пропущен.")
+            logger.debug(f"Нет значения для '{attr_raw}' — блок удалён.")
             return ""
 
-        # случайный диапазон
-        if num2:
-            check_num = random.randint(min(num1, int(num2)), max(num1, int(num2)))
-        else:
-            check_num = num1
+        check_num = (
+            random.randint(min(num1, int(num2)), max(num1, int(num2)))
+            if num2 else num1
+        )
 
-        # проверка условия
         if op == ">":
             result = value > check_num
         elif op == "<":
@@ -10400,25 +10969,31 @@ def apply_effect_values(base_text, effects_dict):
 
     text = re.sub(logic_pattern, logic_replacer, text)
 
-    # --- 3. Простые {{атрибут}} ---
-    def value_replacer(match):
-        attr = match.group(1).strip().lower()
-
-        # если внутри встречаются операторы — оставляем без изменений
-        if re.search(r"[:<>=\-]", attr):
-            return "{{" + match.group(1) + "}}"
+    # --- 3. Простые подстановки {{{атрибут}}} ---
+    def triple_value_replacer(match):
+        attr_raw = match.group(1)
+        attr = attr_raw.strip().lower()
 
         value = normalized_effects.get(attr)
-        return str(value) if value is not None else "{{" + match.group(1) + "}}"
+        if value is None:
+            logger.debug(f"Нет значения для '{{{{{{{attr_raw}}}}}}}'")
+            return "значение не обнаружено в текущей игре"
 
-    text = re.sub(r"\{\{\s*([а-яА-Яa-zA-Z_]+)\s*\}\}", value_replacer, text)
+        return str(value)
 
-    # --- 4. Если весь текст пуст ---
+    text = re.sub(
+        r"\{\{\{\s*([а-яА-ЯёЁa-zA-Z_]+)\s*\}\}\}",
+        triple_value_replacer,
+        text
+    )
+
+    # --- 4. Если результат пуст ---
     if not text.strip():
         return "Нет текста для отображения в текущем прохождении из-за несоответствия атрибутам."
 
     logger.info(f"text: {text}")
     return text
+
 # --- Логика создания истории (ConversationHandler) ---
 
 async def show_story_fragment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -12245,6 +12820,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
