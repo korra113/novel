@@ -3808,21 +3808,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user_id_str = str(update.effective_user.id)
     
-    # --- ДОБАВЛЕНО: Проверка глобального ключа ---
+    # --- Проверка глобального ключа ---
     ensure_global_user_secret(user_id_str)
     # ---------------------------------------------
 
     message_text = update.message.text.strip() if update.message and update.message.text else ""
     chat_type = update.effective_chat.type if update.effective_chat else "private"
 
-    # Групповой чат: реагировать только на foxstart или ID истории
-    # 👇 ДОПОЛНЕНИЕ: если личка и просто текст — считаем его аргументом
+    # Если личка и просто текст — считаем его аргументом
     if chat_type == "private" and not context.args and message_text:
         context.args = [message_text]
 
     # Групповой чат: реагировать только на foxstart или ID истории
     if chat_type != "private":
-        # Загрузка всех историй для проверки ID
         all_data = load_data()
         users_story = all_data.get("users_story", {})
 
@@ -3846,11 +3844,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 title = story_data.get("title", "Без названия")
                 neural = story_data.get("neural", False)
                 author = story_data.get("author", "неизвестен")
+                
+                # Проверка на WebGame для превью в группе
+                is_webgame = story_data.get("webgame_ready", False)
 
                 info = f"📖 История: «{title}»\n✍️ Автор: {author}"
                 if neural:
                     info += " (нейроистория)"
+                if is_webgame:
+                    info += " (WebGame 🎮)"
 
+                # Если это WebGame, логика кнопки может отличаться, но пока оставляем стандартный запуск, 
+                # который перехватится ниже, если нажмут start
                 suffix = f"{user_id_str}_{message_text}_main_1"
                 callback_data = f"nstartstory_{suffix}"
 
@@ -3858,7 +3863,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     [InlineKeyboardButton("▶️ Открыть", callback_data=callback_data)]
                 ])
                 await update.effective_message.reply_text(
-                    f"🎮 Обнаружена история.\n\n{info}\n\nНажмите кнопку ниже, чтобы вызвать своё персональное сообщение для прохождения в нём этой истории:\n\n<i>(обратите внимание что если автор вызовет эту историю через @FoxNovel_bot то можно настроить совместное прохождение в одном окне, тогда выборы будут делаться по голосам)</i>",
+                    f"🎮 Обнаружена история.\n\n{info}\n\nНажмите кнопку ниже...",
                     reply_markup=keyboard,
                     parse_mode=ParseMode.HTML
                 )
@@ -3887,6 +3892,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 break
 
         if story_data:
+            # ▼▼▼ НОВАЯ ЛОГИКА ДЛЯ WEBGAME ▼▼▼
+            # Проверяем флаг webgame_ready
+            if story_data.get("webgame_ready", False):
+                # Формируем URL для WebApp
+                # https://novel-qg4c.onrender.com/{userid}_{storyid}/html/play
+                web_game_url = f"https://novel-qg4c.onrender.com/{story_owner_id}_{story_id_to_start}/html/play"
+                
+                # Создаем кнопку WebApp
+                web_app_info = WebAppInfo(url=web_game_url)
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🎮 Играть", web_app=web_app_info)]
+                ])
+                
+                await update.effective_message.reply_text(
+                    "Запустите игру по кнопке ниже:",
+                    reply_markup=keyboard
+                )
+                return  # ⛔ ПРЕКРАЩАЕМ выполнение функции, чтобы не запустить рендер в чате
+            # ▲▲▲ КОНЕЦ НОВОЙ ЛОГИКИ ▲▲▲
+
             if story_data.get("fragments"):
                 if "main_1" in story_data["fragments"]:
                     first_fragment_id = "main_1"
@@ -3894,18 +3919,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     first_fragment_id = next(iter(story_data["fragments"]), None)
                 if first_fragment_id:
                     context.user_data.clear()
-                    # ▼▼▼ НАЧАЛО ИСПРАВЛЕНИЯ ▼▼▼
-                    # Инициализируем и сохраняем начальный прогресс пользователя.
-                    # Это "сообщит" боту, что пользователь официально начал историю с этого фрагмента.
+                    
                     initial_progress = {
                         "fragment_id": first_fragment_id,
-                        "current_effects": {}  # Начинаем с пустыми эффектами
+                        "current_effects": {}
                     }
-                    # Убедитесь, что у вас есть функция save_user_story_progress
-                    # и она импортирована в этот файл.
+                    
                     save_user_story_progress(story_id_to_start, int(user_id_str), initial_progress)
-                    logger.info(f"Пользователь {user_id_str} запускает историю {story_id_to_start}. Начальный прогресс для фрагмента {first_fragment_id} сохранен.")
-                    # ▲▲▲ КОНЕЦ ИСПРАВЛЕНИЯ ▲▲▲
+                    logger.info(f"Пользователь {user_id_str} запускает историю {story_id_to_start}...")
 
                     placeholder_message = await update.effective_message.reply_text("⏳ Загрузка истории...")
 
@@ -3938,31 +3959,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             # Если приватный чат — покажем меню
             if chat_type == "private":
+                from firebase_admin import db 
                 
-                # --- ПОЛУЧЕНИЕ КЛЮЧА ---
-                from firebase_admin import db # Убедись, что импорт есть
-                
-                # Сначала генерируем/проверяем, что ключ есть
                 ensure_global_user_secret(user_id_str) 
                 
-                # Достаем ключ из базы
                 secret_ref = db.reference(f'users_story/{user_id_str}/secret_key')
                 secret_key = secret_ref.get()
                 
-                # Если вдруг ключа нет (эксепшн или сбой), генерируем на лету (фоллбэк)
                 if not secret_key:
                     secret_key = generate_secret_key()
                     secret_ref.set(secret_key)
 
-                # Добавляем ключ в URL как GET-параметр ?secret=...
                 webapp_url = f"https://novel-qg4c.onrender.com/{user_id_str}?secret={secret_key}"
-                # -----------------------
                
                 keyboard = [
                     [InlineKeyboardButton("🌠Создать историю", callback_data='create_story_start')],
-                    # Ссылка теперь содержит секретный ключ
                     [InlineKeyboardButton("🦊Создать/редактировать через web", url=webapp_url)],
-                    [InlineKeyboardButton("📂 Загрузить прохождение", callback_data='load_menu_start')], # <-- НОВАЯ КНОПКА    
+                    [InlineKeyboardButton("📂 Загрузить прохождение", callback_data='load_menu_start')],   
                     [InlineKeyboardButton("✧ 〰️〰️✦〰️〰️ ✧", callback_data='ignore')],                
                     [InlineKeyboardButton("✏️Посмотреть мои истории", callback_data='view_stories')],
                     [InlineKeyboardButton("🌟Посмотреть общие истории", callback_data='public_stories')],
@@ -3972,12 +3985,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
                 await update.effective_message.reply_text(
                     '🌠Добро пожаловать в бот для создания и прохождения визуальных новелл!\n\n'
-                    'Если у вас есть ID истории — отправьте его, и она начнётся.\nИли создайте свою, или откройте публичные:\n\nПри выборе создания истории через web откроется удобный функциональный вебредактор. Любую историю в любой момент вы можете открывать или редактировать как через него так и внутри бота.',
+                    'Если у вас есть ID истории — отправьте его, и она начнётся.\nИли создайте свою, или откройте публичные:',
                     reply_markup=reply_markup
                 )
                 return
             else:
-                return  # В группе — просто молча игнорируем
+                return
+
 
 
 
@@ -12909,6 +12923,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
