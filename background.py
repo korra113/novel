@@ -1115,11 +1115,7 @@ def get_story_effects(user_id_str, story_id):
 
 @app.route('/api/stories/<user_id_str>', methods=['GET'])
 def get_story_list(user_id_str):
-    """
-    Получает список историй (только метаданные) для пользователя.
-    """
     from novel import load_all_user_stories
-    
     try:
         all_stories = load_all_user_stories(user_id_str)
         result = []
@@ -1127,22 +1123,40 @@ def get_story_list(user_id_str):
         for story_id, story_data in all_stories.items():
             if story_id == "secret_key":
                 continue
-    
+
             result.append({
                 "id": story_id,
                 "title": story_data.get("title", "Без названия"),
                 "public": story_data.get("public", False),
                 "user_name": story_data.get("user_name", None),
-                # --- ДОБАВЛЯЕМ ВОТ ЭТУ СТРОКУ ---
-                "neural": story_data.get("neural", False) 
-                # --------------------------------
+                "neural": story_data.get("neural", False),
+                # 👇 ДОБАВЛЯЕМ ЭТУ СТРОКУ
+                "webgame_ready": story_data.get("webgame_ready", False) 
             })
 
         return jsonify(result)
     except Exception as e:
-        # Лучше использовать logging вместо print/logger если не настроен, но оставим как было
         print(f"Ошибка при получении списка историй для {user_id_str}: {e}")
         return jsonify({"error": "Не удалось загрузить список историй"}), 500
+
+# 2. Добавьте НОВЫЙ маршрут для переключения статуса WebGame
+@app.route('/api/story/<user_id_str>/<story_id>/webgame', methods=['POST'])
+def update_webgame_status(user_id_str, story_id):
+    from novel import load_user_story, save_story_data
+    
+    data = request.get_json()
+    # Получаем статус, по умолчанию False
+    new_status = bool(data.get("webgame_ready"))
+    
+    story = load_user_story(user_id_str, story_id)
+    if not story:
+        return jsonify({"error": "История не найдена"}), 404
+        
+    story["webgame_ready"] = new_status
+    save_story_data(user_id_str, story_id, story)
+    
+    return jsonify({"status": "ok", "webgame_ready": new_status})
+
 import uuid # <-- 1. ДОБАВЬТЕ ЭТОТ ИМПОРТ
 # <-- 3. ДОБАВЬТЕ ЭТОТ НОВЫЙ МАРШРУТ (после get_stories_list) -->
 # Функция генерации ключа (такая же, как в боте)
