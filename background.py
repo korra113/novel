@@ -1336,6 +1336,78 @@ def validate_access_route():
         return jsonify({"valid": False, "reason": "Server error"}), 500
 
 
+#---------------------------------------------------------------- --- TUTORIAL SYSTEM START ---
+
+
+@app.route('/api/tutorials', methods=['GET'])
+def get_tutorials_list_route():
+    from novel import fetch_tutorials_list
+    
+    tutorials = fetch_tutorials_list()
+    if tutorials is None:
+        return jsonify({"error": "Failed to fetch tutorials"}), 500
+    
+    return jsonify(tutorials)
+
+@app.route('/api/tutorials/publish', methods=['POST'])
+def publish_tutorial_route():
+    from novel import publish_tutorial_entry
+    
+    data = request.get_json()
+    admin_id = data.get('admin_id')
+    source_story_id = data.get('story_id')
+    title = data.get('title')
+    description = data.get('description')
+    modes = data.get('modes', {}) 
+
+    if not source_story_id or not title:
+        return jsonify({"error": "Missing data"}), 400
+
+    success, result = publish_tutorial_entry(admin_id, source_story_id, title, description, modes)
+    
+    if success:
+        return jsonify({"status": "ok", "tutorial_id": result})
+    else:
+        # Если result == "Unauthorized", можно вернуть 403, иначе 500
+        status_code = 403 if result == "Unauthorized" else 500
+        return jsonify({"error": result}), status_code
+
+@app.route('/api/tutorials/<tutorial_id>', methods=['DELETE'])
+def delete_tutorial_route(tutorial_id):
+    from novel import delete_tutorial_entry
+    
+    admin_id = request.args.get('admin_id')
+    
+    success, result = delete_tutorial_entry(admin_id, tutorial_id)
+    
+    if success:
+        return jsonify({"status": "ok"})
+    else:
+        status_code = 403 if result == "Unauthorized" else 500
+        return jsonify({"error": result}), status_code
+
+@app.route('/api/tutorials/clone', methods=['POST'])
+def clone_tutorial_to_user_route():
+    from novel import clone_tutorial_logic
+    
+    data = request.get_json()
+    user_id = data.get('user_id')
+    tutorial_id = data.get('tutorial_id')
+
+    if not user_id or not tutorial_id:
+        return jsonify({"error": "Missing data"}), 400
+
+    success, result = clone_tutorial_logic(user_id, tutorial_id)
+    
+    if success:
+        return jsonify({"status": "ok", "new_story_id": result})
+    else:
+        # result содержит сообщение об ошибке
+        status_code = 404 if result == "Tutorial not found" else 500
+        return jsonify({"error": result}), status_code
+
+
+
 def run():
     app.run(host='0.0.0.0', port=80)
 
