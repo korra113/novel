@@ -1125,6 +1125,9 @@ def get_story_list(user_id_str):
         result = []
 
         for story_id, story_data in all_stories.items():
+            if story_id == "secret_key":
+                continue
+    
             result.append({
                 "id": story_id,
                 "title": story_data.get("title", "Без названия"),
@@ -1292,7 +1295,31 @@ def react_router_entry(user_story):
         else:
             return send_from_directory(app.static_folder, 'index.html')
 
+@app.route('/api/auth/validate_access', methods=['POST'])
+def validate_access_route():
+    from firebase_admin import db
+    
+    data = request.get_json()
+    user_id = data.get('user_id')
+    client_secret = data.get('secret_key')
 
+    if not user_id or not client_secret:
+        return jsonify({"valid": False, "reason": "No credentials provided"}), 400
+
+    try:
+        # Получаем настоящий ключ из базы
+        ref = db.reference(f'users_story/{user_id}/secret_key')
+        stored_key = ref.get()
+
+        # Сравниваем (безопасное сравнение строк)
+        if stored_key and stored_key == client_secret:
+            return jsonify({"valid": True})
+        else:
+            return jsonify({"valid": False, "reason": "Invalid key"}), 403
+            
+    except Exception as e:
+        logger.error(f"Auth validation error for {user_id}: {e}")
+        return jsonify({"valid": False, "reason": "Server error"}), 500
 
 
 def run():
