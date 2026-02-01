@@ -1142,6 +1142,11 @@ def get_story_list(user_id_str):
         return jsonify({"error": "Не удалось загрузить список историй"}), 500
 import uuid # <-- 1. ДОБАВЬТЕ ЭТОТ ИМПОРТ
 # <-- 3. ДОБАВЬТЕ ЭТОТ НОВЫЙ МАРШРУТ (после get_stories_list) -->
+# Функция генерации ключа (такая же, как в боте)
+def generate_secret_key(length: int = 12) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
 @app.route('/api/stories/<user_id_str>/create', methods=['POST'])
 def create_new_story(user_id_str):
     """
@@ -1159,6 +1164,9 @@ def create_new_story(user_id_str):
 
         # Генерация уникального ID для истории
         story_id = uuid.uuid4().hex[:10] # 10-значный ID
+        
+        # Генерация секретного ключа
+        secret_key = generate_secret_key()
 
         # Создание базовой структуры истории
         new_story = {
@@ -1167,13 +1175,13 @@ def create_new_story(user_id_str):
             "user_name": user_name,
             "author": author_name,
             "public": False, # По умолчанию не публичная
+            "secret_key": secret_key, # <--- ДОБАВЛЕНО ПОЛЕ
             "fragments": {
                 "main_1": {
                     "text": "Начало вашей новой истории...",
                     "choices": []
                 }
             }
-            # Можете добавить другие поля по умолчанию, если нужно
         }
 
         # Сохраняем новую историю
@@ -1188,6 +1196,7 @@ def create_new_story(user_id_str):
     except Exception as e:
         logger.error(f"Ошибка при создании истории для {user_id_str}: {e}")
         return jsonify({"error": "Не удалось создать историю"}), 500
+
 
 
 
