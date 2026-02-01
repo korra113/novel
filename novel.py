@@ -1490,10 +1490,9 @@ def load_story_settings(inline_message_id: str) -> dict:
 def load_all_user_stories(user_id_str: str) -> dict:
     """
     Загружает все истории пользователя по user_id_str.
-    Не ищет среди других пользователей и не проверяет coop_edit.
+    Фильтрует 'secret_key' и другие служебные поля, возвращая только словари историй.
     """
     try:
-        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -1502,7 +1501,10 @@ def load_all_user_stories(user_id_str: str) -> dict:
         data = ref.get()
 
         if data is not None and isinstance(data, dict):
-            return data
+            # ЛАКОНИЧНОЕ РЕШЕНИЕ:
+            # Возвращаем только те элементы, значение которых — словарь (dict).
+            # Это автоматически уберет 'secret_key' (str) и любые другие будущие строковые поля.
+            return {k: v for k, v in data.items() if isinstance(v, dict)}
         else:
             logger.info(f"У пользователя {user_id_str} не найдено историй.")
             return {}
@@ -1515,13 +1517,11 @@ def load_all_user_stories(user_id_str: str) -> dict:
         return {}
 
 
-
 def load_all_coop_stories_with_user(user_id_str: str) -> dict:
     """
     Загружает все истории всех пользователей, в которых user_id_str есть в списке coop_edit.
     """
     try:
-        
         if not firebase_admin._DEFAULT_APP_NAME:
             logger.error("Firebase приложение не инициализировано.")
             return {}
@@ -1536,7 +1536,13 @@ def load_all_coop_stories_with_user(user_id_str: str) -> dict:
         for other_user_id, stories in all_users_data.items():
             if not isinstance(stories, dict):
                 continue
+            
+            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
             for story_id, story_data in stories.items():
+                # Пропускаем secret_key и любой мусор, который не является словарем истории
+                if not isinstance(story_data, dict):
+                    continue
+                    
                 coop_list = story_data.get("coop_edit", [])
                 if user_id_str in coop_list:
                     result[story_id] = story_data
@@ -2097,7 +2103,6 @@ async def transfer_to_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Переносит все истории из users_story → stories_index
     только если у истории есть owner_id.
-    Используется один раз при миграции структуры хранения.
     """
     try:
         users_story_ref = db.reference("users_story")
@@ -2115,11 +2120,15 @@ async def transfer_to_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
             
             for story_id, story_data in stories.items():
+                # --- ИСПРАВЛЕНИЕ: Проверка типа данных ---
+                if not isinstance(story_data, dict):
+                    continue
+
                 owner_id = story_data.get("owner_id")
 
                 if not owner_id:
                     skipped += 1
-                    continue  # пропускаем истории без владельца
+                    continue
 
                 index_ref = db.reference(f"stories_index/{story_id}")
                 index_ref.set({
@@ -12881,6 +12890,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
