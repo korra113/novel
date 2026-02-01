@@ -2209,8 +2209,13 @@ async def start_interactive_training(update: Update, context: ContextTypes.DEFAU
     source_id = "800"
 
     user_story_target = users_story.get(user_id, {})
-    user_maps_target = story_maps.get(user_id, {})
+    # Очищаем целевой словарь от мусора (если вдруг там строки) для корректной работы
+    if isinstance(user_story_target, dict):
+         user_story_target = {k: v for k, v in user_story_target.items() if isinstance(v, dict)}
+    else:
+         user_story_target = {}
 
+    user_maps_target = story_maps.get(user_id, {})
     # ---------------------------------------------------
     # Подготовка: Создаем карту существующих заголовков пользователя
     # { "Название истории": "existing_story_id" }
@@ -2260,6 +2265,9 @@ async def start_interactive_training(update: Update, context: ContextTypes.DEFAU
     # КОПИРОВАНИЕ – ЕДИНЫЙ ЦИКЛ
     # ---------------------------------------------------
     for old_sid, story_data in source_stories.items():
+        # Пропускаем secret_key
+        if not isinstance(story_data, dict):
+            continue
 
         # Убедимся, что исходный ID — типа "800" (или любой другой формат источника)
         if not (old_sid.isdigit() and len(old_sid) == 3):
@@ -2268,74 +2276,59 @@ async def start_interactive_training(update: Update, context: ContextTypes.DEFAU
         # Получаем заголовок копируемой истории
         source_title = story_data.get("title")
 
-        # ❗ ПРОВЕРКА: Если такой заголовок уже есть, берем его ID. Иначе - генерируем новый.
         if source_title and source_title in existing_titles_map:
-            # Старый ID
             old_existing_sid = existing_titles_map[source_title]
-
-            # ❗ Используем его ТОЛЬКО если он начинается с "int"
             if old_existing_sid.startswith("int"):
                 new_sid = old_existing_sid
             else:
-                # Иначе — генерируем новый ID
                 new_sid = generate_new_story_id()
-                existing_titles_map[source_title] = new_sid  # переопределяем ID для этого title
+                existing_titles_map[source_title] = new_sid
         else:
             new_sid = generate_new_story_id()
             if source_title:
                 existing_titles_map[source_title] = new_sid
+        
         # --- копируем саму историю (перезапись) ---
         user_story_target[new_sid] = story_data.copy()
-        # Если у вас есть отдельная функция сохранения - вызываем (она обновит этот ID)
         save_story_data(user_id, new_sid, story_data)
 
-        # --- копируем карты, принадлежащие этой истории ---
-        for old_map_id, map_content in source_maps.items():
-            # Карты для истории начинаются с old_sid (например: 800_main_1)
-            if old_map_id.startswith(old_sid):
-                # Заменяем префикс источника на целевой ID
-                new_map_id = old_map_id.replace(old_sid, new_sid, 1)
+        # --- копируем карты ---
+        if isinstance(source_maps, dict):
+            for old_map_id, map_content in source_maps.items():
+                if old_map_id.startswith(old_sid):
+                    new_map_id = old_map_id.replace(old_sid, new_sid, 1)
+                    user_maps_target[new_map_id] = (
+                        map_content.copy() if isinstance(map_content, dict) else map_content
+                    )
 
-                user_maps_target[new_map_id] = (
-                    map_content.copy() if isinstance(map_content, dict) else map_content
-                )
-
-    # ---------------------------------------------------
     # Сохраняем результат в БД
-    # ---------------------------------------------------
     db.reference(f"story_maps/{user_id}").set(user_maps_target)
-    db.reference(f"users_story/{user_id}").set(user_story_target)
-
-    # ---------------------------------------------------
-    # Формируем клавиатуру с СОРТИРОВКОЙ
-    # ---------------------------------------------------
+    # Здесь важно не перезатереть secret_key пользователя, поэтому используем .update() для stories
+    # Или просто полагаемся на save_story_data внутри цикла, а здесь ничего не делаем.
+    # Но так как user_story_target обновлялся в памяти, можно так:
+    # (Осторожно, .set() с перезаписью может удалить secret_key, если он не в user_story_target)
+    # Лучше просто положиться на save_story_data внутри цикла.
+    
+    # --- Формируем клавиатуру ---
     keyboard_rows = []
     button_callback_data = "play_000_001_main_1"
+    keyboard_rows.append([InlineKeyboardButton("ℹ Подробнее", callback_data=button_callback_data)])
 
-    keyboard_rows.append([
-        InlineKeyboardButton("ℹ Подробнее", callback_data=button_callback_data)
-    ])
-
-    # Выбираем только обучающие истории
+    # Выбираем только обучающие истории (И ПРОВЕРЯЕМ DICT)
     imported_stories_list = [
         (sid, sdata) for sid, sdata in user_story_target.items()
-        if sid.startswith("int") and len(sid) >= 8
+        if isinstance(sdata, dict) and sid.startswith("int") and len(sid) >= 8
     ]
 
-    # --- Функция натуральной сортировки ---
-    # Разбивает строку на текст и числа: "Глава 10" -> ["Глава ", 10]
     def natural_sort_key(item):
         title = item[1].get("title", "")
         return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', title)]
 
-    # Сортируем список
     imported_stories_list.sort(key=natural_sort_key)
 
-    # Генерируем кнопки
     for sid, sdata in imported_stories_list:
         title = sdata.get("title", f"История {sid}")
         short_title = title[:40] + ("…" if len(title) > 40 else "")
-
         keyboard_rows.append([
             InlineKeyboardButton(
                 f"📘 {short_title}",
@@ -2345,16 +2338,12 @@ async def start_interactive_training(update: Update, context: ContextTypes.DEFAU
 
     reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
-    # ---------------------------------------------------
-    # Заменяем "Подождите..." итогом
-    # ---------------------------------------------------
     await wait_message.edit_text(
         "🎓 *Обучающие материалы скопированы (или обновлены)!*\n\n"
         "Вы можете открыть любую учебную историю ниже или посмотреть подробное объяснение по кнопке «Подробнее».",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
-
 
 
 async def transfer_story_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2367,7 +2356,9 @@ async def transfer_story_command(update: Update, context: ContextTypes.DEFAULT_T
 
         # ======== Если команда вызвана без аргументов → просто показываем список историй ========
         if not context.args:
-            user_stories = user_000_ref.get() or {}
+            # Загружаем с проверкой
+            raw_stories = user_000_ref.get() or {}
+            user_stories = {k: v for k, v in raw_stories.items() if isinstance(v, dict)}
 
             if not user_stories:
                 await message.reply_text("📭 У пользователя 000 пока нет историй.")
@@ -2409,17 +2400,23 @@ async def transfer_story_command(update: Update, context: ContextTypes.DEFAULT_T
             source_owner_id = index_data['owner_id']
             source_content = db.reference(f'users_story/{source_owner_id}/{target_story_id}').get()
 
-        # Fallback-поиск
+        # Fallback-поиск (С ИСПРАВЛЕНИЕМ)
         if not source_content:
             all_users_ref = db.reference('users_story')
             all_data = all_users_ref.get()
 
             if all_data:
                 for uid, stories in all_data.items():
+                    if not isinstance(stories, dict):
+                        continue
+                        
                     if target_story_id in stories:
-                        source_owner_id = uid
-                        source_content = stories[target_story_id]
-                        break
+                        potential_content = stories[target_story_id]
+                        # Проверяем, что это не secret_key или мусор
+                        if isinstance(potential_content, dict):
+                            source_owner_id = uid
+                            source_content = potential_content
+                            break
 
         if not source_content:
             await message.reply_text(
@@ -3526,8 +3523,8 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not query_text:
         # Показываем все истории текущего пользователя
-        user_stories_ref = db.reference(f'users_story/{user_id}')
-        stories_to_show = user_stories_ref.get() or {}
+        # --- ИСПРАВЛЕНИЕ: используем load_all_user_stories, который уже фильтрует ---
+        stories_to_show = load_all_user_stories(user_id)
     else:
         query_text_lower = query_text.lower()
         is_id_search = is_possible_story_id(query_text_lower)
@@ -3536,24 +3533,36 @@ async def inlinequery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # Поиск по всем историям всех пользователей только по ID
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
+                if not isinstance(user_stories_dict, dict):
+                    continue
+                
                 if query_text_lower in user_stories_dict:
-                    stories_to_show[query_text_lower] = user_stories_dict[query_text_lower]
-                    break  # Нашли — достаточно
+                    found_story = user_stories_dict[query_text_lower]
+                    # Проверяем, что это словарь, а не ключ
+                    if isinstance(found_story, dict):
+                        stories_to_show[query_text_lower] = found_story
+                        break  # Нашли — достаточно
         else:
             # Поиск по заголовкам только среди историй текущего пользователя
-            user_stories = db.reference(f'users_story/{user_id}').get() or {}
+            # Используем загрузку с фильтрацией
+            user_stories = load_all_user_stories(user_id)
             for story_id_key, story_content in user_stories.items():
+                # story_content уже точно dict благодаря load_all_user_stories
                 title = story_content.get("title", "").lower()
                 if query_text_lower in title:
                     stories_to_show[story_id_key] = story_content
 
     for story_id, story_data in stories_to_show.items():
+        # Дополнительная защита
+        if not isinstance(story_data, dict):
+            continue
+
         # Определяем владельца (нужно только если поиск был по ID)
         owner_user_id_for_story = user_id
         if is_possible_story_id(query_text):
             all_users_data = db.reference('users_story').get() or {}
             for uid, user_stories_dict in all_users_data.items():
-                if story_id in user_stories_dict:
+                if isinstance(user_stories_dict, dict) and story_id in user_stories_dict:
                     owner_user_id_for_story = uid
                     break
 
@@ -10325,8 +10334,16 @@ async def view_public_stories_list(update: Update, context: ContextTypes.DEFAULT
     all_stories = all_data.get("users_story", {})
 
     public_stories = []
+    # --- ИСПРАВЛЕНИЕ: Фильтрация на уровне пользователей и историй ---
     for user_id, user_stories in all_stories.items():
+        if not isinstance(user_stories, dict):
+            continue
+            
         for story_id, story_data in user_stories.items():
+            # Пропускаем secret_key и прочий мусор
+            if not isinstance(story_data, dict):
+                continue
+
             if story_data.get("public") and "user_name" in story_data:
                 title = story_data.get("title", f"История {story_id[:8]}")
                 short_title = title[:25] + ("…" if len(title) > 25 else "")
@@ -10352,7 +10369,7 @@ async def view_public_stories_list(update: Update, context: ContextTypes.DEFAULT
         callback_play = f"nstartstory_{user_id}_{story_id}_main_1"
         story_button = InlineKeyboardButton(
             f"{short_title} (Автор: {author})",
-            callback_data=f"info_{user_id}_{story_id}"
+            callback_data=f"info_{user_id}_{story_id}" # Обратите внимание, обработчика info_ пока нет в main, возможно стоит заменить на noop
         )
         keyboard.append([
             InlineKeyboardButton("▶️ Играть", callback_data=callback_play),
@@ -10379,7 +10396,6 @@ async def view_public_stories_list(update: Update, context: ContextTypes.DEFAULT
             message_text,
             reply_markup=reply_markup
         )
-
 
 
 STORIES_PER_PAGE = 10  # Количество историй на одной странице
@@ -10567,7 +10583,11 @@ async def delete_all_neural_stories_firebase(update: Update, context: ContextTyp
         return
 
     deleted_any = False
+    # --- ИСПРАВЛЕНИЕ: Фильтрация строк (secret_key) ---
     for story_id, story_data in list(all_stories.items()):
+        if not isinstance(story_data, dict):
+            continue
+            
         if story_data.get("neural"):
             user_stories_ref.child(story_id).delete()
             deleted_any = True
@@ -10583,7 +10603,6 @@ async def delete_all_neural_stories_firebase(update: Update, context: ContextTyp
         )
     else:
         await update.callback_query.answer("Нейроистории не найдены.", show_alert=True)
-
 
 
 async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12890,6 +12909,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
