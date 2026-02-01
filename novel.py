@@ -482,6 +482,127 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
 
 
 
+# Константы для туториалов
+TUTORIALS_DB_PATH = 'tutorials_catalog'
+ADMIN_USER_ID_STR = "6217936347"  # ID Админа
+
+def fetch_tutorials_list():
+    """Получает список всех туториалов из БД."""
+    try:
+        ref = db.reference(TUTORIALS_DB_PATH)
+        tutorials = ref.get()
+        if not tutorials:
+            return []
+        
+        # Превращаем dict в list
+        result = []
+        for key, val in tutorials.items():
+            val['id'] = key
+            result.append(val)
+        return result
+    except Exception as e:
+        logger.error(f"Error fetching tutorials in novel.py: {e}")
+        return None
+
+def publish_tutorial_entry(admin_id, story_id, title, description, modes):
+    """Публикует запись о туториале (только метаданные)."""
+    # Проверка прав
+    if str(admin_id) != ADMIN_USER_ID_STR:
+        return False, "Unauthorized"
+
+    try:
+        ref = db.reference(TUTORIALS_DB_PATH).push()
+        tutorial_data = {
+            "title": title,
+            "description": description,
+            "source_owner_id": admin_id,
+            "source_story_id": story_id,
+            "modes": modes,
+            "created_at": {".sv": "timestamp"}
+        }
+        ref.set(tutorial_data)
+        return True, ref.key
+    except Exception as e:
+        logger.error(f"Error publishing tutorial: {e}")
+        return False, str(e)
+
+def delete_tutorial_entry(admin_id, tutorial_id):
+    """Удаляет запись туториала."""
+    if str(admin_id) != ADMIN_USER_ID_STR:
+        return False, "Unauthorized"
+
+    try:
+        db.reference(f'{TUTORIALS_DB_PATH}/{tutorial_id}').delete()
+        return True, "Deleted"
+    except Exception as e:
+        logger.error(f"Error deleting tutorial: {e}")
+        return False, str(e)
+
+def clone_tutorial_logic(user_id, tutorial_id):
+    """
+    Полная логика клонирования истории:
+    1. Читает туториал
+    2. Копирует users_story
+    3. Копирует story_maps
+    4. Копирует HTMLexport
+    """
+    try:
+        # 1. Получаем данные туториала
+        tut_ref = db.reference(f'{TUTORIALS_DB_PATH}/{tutorial_id}')
+        tut_data = tut_ref.get()
+        
+        if not tut_data:
+            return False, "Tutorial not found"
+
+        source_owner = tut_data['source_owner_id']
+        source_story_id = tut_data['source_story_id']
+        
+        # 2. Генерируем новый ID
+        new_story_id = uuid.uuid4().hex[:10]
+
+        # 3. КОПИРОВАНИЕ ДАННЫХ ИСТОРИИ (users_story)
+        src_story_ref = db.reference(f'users_story/{source_owner}/{source_story_id}')
+        story_content = src_story_ref.get()
+        
+        if not story_content:
+            return False, "Source story data missing"
+
+        # Очищаем и обновляем метаданные
+        story_content_copy = copy.deepcopy(story_content)
+        story_content_copy['owner_id'] = user_id
+        story_content_copy['title'] = f"[Обучение] {tut_data.get('title', 'History')}"
+        story_content_copy.pop('secret_key', None) # Удаляем старый ключ
+        
+        # Сохраняем пользователю
+        db.reference(f'users_story/{user_id}/{new_story_id}').set(story_content_copy)
+        
+        # Обновляем индекс (важно для поиска)
+        db.reference(f'stories_index/{new_story_id}').set({
+            "owner_id": user_id,
+            "updated": int(time.time())
+        })
+
+        # 4. КОПИРОВАНИЕ КАРТЫ (story_maps)
+        src_map_ref = db.reference(f'story_maps/{source_owner}/{source_story_id}')
+        map_content = src_map_ref.get()
+        if map_content:
+            db.reference(f'story_maps/{user_id}/{new_story_id}').set(map_content)
+
+        # 5. КОПИРОВАНИЕ ВИЗУАЛА (HTMLexport)
+        src_html_ref = db.reference(f'HTMLexport/{source_owner}/{source_story_id}')
+        html_content = src_html_ref.get()
+        if html_content:
+            db.reference(f'HTMLexport/{user_id}/{new_story_id}').set(html_content)
+
+        return True, new_story_id
+
+    except Exception as e:
+        logger.error(f"Clone error inside novel.py: {e}")
+        return False, str(e)
+
+
+
+
 
 
 import requests
@@ -12923,6 +13044,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
