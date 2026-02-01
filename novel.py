@@ -154,7 +154,19 @@ ADMIN_USER_ID = 6217936347
 logger = logging.getLogger(__name__)
 
 
-
+def ensure_global_user_secret(user_id: str):
+    """
+    Проверяет наличие глобального secret_key у пользователя (рядом с историями)
+    и создает его, если он отсутствует.
+    """
+    try:
+        ref = db.reference(f'users_story/{user_id}/secret_key')
+        if not ref.get():
+            new_key = generate_secret_key()
+            ref.set(new_key)
+            logger.info(f"Сгенерирован глобальный secret_key для пользователя {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка при проверке глобального secret_key для {user_id}: {e}")
 
 async def delete_inline_stories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -3777,6 +3789,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает команды в личке и группах: запускает истории по ID или показывает меню."""
 
     user_id_str = str(update.effective_user.id)
+    
+    # --- ДОБАВЛЕНО: Проверка глобального ключа ---
+    ensure_global_user_secret(user_id_str)
+    # ---------------------------------------------
+
     message_text = update.message.text.strip() if update.message and update.message.text else ""
     chat_type = update.effective_chat.type if update.effective_chat else "private"
 
@@ -3946,8 +3963,12 @@ def _remove_task_from_context(task: asyncio.Task, user_data: Dict[str, Any]):
 async def restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Полностью очищает состояние пользователя, отменяет его фоновые задачи и возвращает в главное меню."""
     user_id = update.effective_user.id
-    logger.info(f"Пользователь {user_id} вызвал restart (через команду или fallback). Отмена активных задач и очистка user_data.")
+    
+    # --- ДОБАВЛЕНО: Проверка глобального ключа ---
+    ensure_global_user_secret(str(user_id))
+    # ---------------------------------------------
 
+    logger.info(f"Пользователь {user_id} вызвал restart (через команду или fallback). Отмена активных задач и очистка user_data.")
     # Отменяем все активные асинхронные задачи пользователя
     if 'user_tasks' in context.user_data and isinstance(context.user_data['user_tasks'], set):
         active_tasks_for_user: Set[asyncio.Task] = context.user_data['user_tasks']
@@ -7209,6 +7230,9 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user = update.message.from_user
     username = user.full_name  # Либо .username для @никнейма
     user_id_str = str(user.id)
+    
+    # --- ДОБАВЛЕНО: Проверка глобального ключа при создании новой истории ---
+    ensure_global_user_secret(user_id_str)
     title = update.message.text.strip()    
     # # Вариант 2: HTML (самый надежный)
     escaped_title = html.escape(title)
@@ -12824,6 +12848,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
