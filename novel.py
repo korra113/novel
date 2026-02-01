@@ -7028,86 +7028,6 @@ DEBUG_DIR = "stories_debug"
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
-async def neural_full_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean_title: str) -> int:
-    user = update.message.from_user
-    user_id = user.id
-    username = user.full_name  # или user.username, если нужен ник
-    user_id_str = context.user_data.get("user_id_str")
-    story_id = context.user_data.get("story_id")
-
-    if not user_id_str or not story_id:
-        await update.message.reply_text("Произошла ошибка: не удалось определить пользователя или ID истории.")
-        return ConversationHandler.END
-
-    waiting_message = await update.message.reply_text(
-        "⌛ Генерирую историю с помощью нейросети. Пожалуйста, подождите..."
-    )
-
-    async def background_generation():
-        raw_response = None
-        try:
-            # Убедитесь, что generate_neural_story, save_story_data и DEBUG_DIR определены
-            raw_response = await generate_neural_story_full(clean_title)
-
-            if not isinstance(raw_response, str):
-                raw_response = json.dumps(raw_response, ensure_ascii=False)
-
-            start = raw_response.find('{')
-            end = raw_response.rfind('}') + 1
-            cleaned_json_str = raw_response[start:end]
-            generated_story = json.loads(cleaned_json_str)
-
-            if not isinstance(generated_story, dict) or \
-               "title" not in generated_story or \
-               "fragments" not in generated_story or \
-               not isinstance(generated_story["fragments"], dict):
-                raise ValueError("Ошибка в структуре сгенерированной истории")
-
-            generated_story["neural"] = True
-            generated_story["neuro_fragments"] = True    
-
-            # 👉 Добавляем автора:
-            generated_story["author"] = f"{username}"
-            generated_story["owner_id"] = f"{user_id}"
-
-            save_story_data(user_id_str, story_id, generated_story)
-
-            context.user_data['current_story'] = generated_story
-            context.user_data['current_fragment_id'] = "1" # Обычно начальный фрагмент
-            context.user_data['next_choice_index'] = 1
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")]
-            ])
-
-            await waiting_message.edit_text(
-                f"✅ <b>История успешно сгенерирована!</b>\n\n<b>Название: {generated_story['title']}</b>\n\nДля запуска воспользуйтесь кнопкой ниже",
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
-        except asyncio.CancelledError:
-            logger.info(f"Генерация истории для пользователя {user_id} была отменена.")
-            try:
-                await waiting_message.edit_text("Генерация истории была отменена.")
-            except Exception as e_edit:
-                logger.warning(f"Не удалось изменить сообщение ожидания при отмене (neural_story): {e_edit}")
-        except Exception as e:
-            logger.error(f"Ошибка при генерации истории для пользователя {user_id}: {e}")
-            try:
-                await waiting_message.edit_text(
-                    "⚠️ Произошла ошибка при генерации истории. Это очень сложная для нейросети задача, поэтому во многих случаях она может возврщать неверные данные которые бот не сможет обработать или обработает не верно приходя к ошибке. Попытайтесь ещё раз. Eсли запрос очень сложный, то попробуйте упростить. Так же можете выбрать более простую функцию /nstory"
-                )
-            except Exception as e_edit:
-                logger.warning(f"Не удалось изменить сообщение ожидания при ошибке (neural_story): {e_edit}")
-
-    # Создаем и сохраняем задачу
-    task = asyncio.create_task(background_generation())
-    user_tasks_set = context.user_data.setdefault('user_tasks', set())
-    user_tasks_set.add(task)
-    task.add_done_callback(lambda t: _remove_task_from_context(t, context.user_data))
-
-    return ConversationHandler.END
-
 async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean_title: str) -> int:
     user = update.message.from_user
     user_id = user.id
@@ -7147,9 +7067,12 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
             generated_story["neuro_fragments"] = True    
 
             # 👉 Добавляем автора:
-            generated_story["author"] = f"{username}"
-            generated_story["owner_id"] = f"{user_id}"
+            secret_key = context.user_data.get("secret_key")
 
+            generated_story["author"] = username
+            generated_story["owner_id"] = str(user_id)
+            generated_story["story_id"] = story_id
+            generated_story["secret_key"] = secret_key  # ← ДОБАВЛЕНО
             save_story_data(user_id_str, story_id, generated_story)
 
             context.user_data['current_story'] = generated_story
@@ -7189,6 +7112,95 @@ async def neural_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean
     return ConversationHandler.END
 
 
+async def neural_full_story(update: Update, context: ContextTypes.DEFAULT_TYPE, clean_title: str) -> int:
+    user = update.message.from_user
+    user_id = user.id
+    username = user.full_name  # или user.username, если нужен ник
+    user_id_str = context.user_data.get("user_id_str")
+    story_id = context.user_data.get("story_id")
+
+    if not user_id_str or not story_id:
+        await update.message.reply_text("Произошла ошибка: не удалось определить пользователя или ID истории.")
+        return ConversationHandler.END
+
+    waiting_message = await update.message.reply_text(
+        "⌛ Генерирую историю с помощью нейросети. Пожалуйста, подождите..."
+    )
+
+    async def background_generation():
+        raw_response = None
+        try:
+            # Убедитесь, что generate_neural_story, save_story_data и DEBUG_DIR определены
+            raw_response = await generate_neural_story_full(clean_title)
+
+            if not isinstance(raw_response, str):
+                raw_response = json.dumps(raw_response, ensure_ascii=False)
+
+            start = raw_response.find('{')
+            end = raw_response.rfind('}') + 1
+            cleaned_json_str = raw_response[start:end]
+            generated_story = json.loads(cleaned_json_str)
+
+            if not isinstance(generated_story, dict) or \
+               "title" not in generated_story or \
+               "fragments" not in generated_story or \
+               not isinstance(generated_story["fragments"], dict):
+                raise ValueError("Ошибка в структуре сгенерированной истории")
+
+            generated_story["neural"] = True
+            generated_story["neuro_fragments"] = True    
+
+            secret_key = context.user_data.get("secret_key")
+
+            generated_story["author"] = username
+            generated_story["owner_id"] = str(user_id)
+            generated_story["story_id"] = story_id
+            generated_story["secret_key"] = secret_key
+
+            save_story_data(user_id_str, story_id, generated_story)
+
+            context.user_data['current_story'] = generated_story
+            context.user_data['current_fragment_id'] = "1" # Обычно начальный фрагмент
+            context.user_data['next_choice_index'] = 1
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📖 Перейти к запуску истории", callback_data=f"nstartstory_{user_id_str}_{story_id}_main_1")]
+            ])
+
+            await waiting_message.edit_text(
+                f"✅ <b>История успешно сгенерирована!</b>\n\n<b>Название: {generated_story['title']}</b>\n\nДля запуска воспользуйтесь кнопкой ниже",
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        except asyncio.CancelledError:
+            logger.info(f"Генерация истории для пользователя {user_id} была отменена.")
+            try:
+                await waiting_message.edit_text("Генерация истории была отменена.")
+            except Exception as e_edit:
+                logger.warning(f"Не удалось изменить сообщение ожидания при отмене (neural_story): {e_edit}")
+        except Exception as e:
+            logger.error(f"Ошибка при генерации истории для пользователя {user_id}: {e}")
+            try:
+                await waiting_message.edit_text(
+                    "⚠️ Произошла ошибка при генерации истории. Это очень сложная для нейросети задача, поэтому во многих случаях она может возврщать неверные данные которые бот не сможет обработать или обработает не верно приходя к ошибке. Попытайтесь ещё раз. Eсли запрос очень сложный, то попробуйте упростить. Так же можете выбрать более простую функцию /nstory"
+                )
+            except Exception as e_edit:
+                logger.warning(f"Не удалось изменить сообщение ожидания при ошибке (neural_story): {e_edit}")
+
+    # Создаем и сохраняем задачу
+    task = asyncio.create_task(background_generation())
+    user_tasks_set = context.user_data.setdefault('user_tasks', set())
+    user_tasks_set.add(task)
+    task.add_done_callback(lambda t: _remove_task_from_context(t, context.user_data))
+
+    return ConversationHandler.END
+
+import secrets
+import string
+def generate_secret_key(length: int = 12) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
 
 async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получает название истории, вызывает нейросеть при (нейро), иначе — генерирует ID и переходит к добавлению первого фрагмента."""
@@ -7202,9 +7214,11 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     escaped_title = html.escape(title)
     current_parse_mode = ParseMode.HTML
     story_id = uuid.uuid4().hex[:10]
+    secret_key = generate_secret_key()
 
     context.user_data['user_id_str'] = user_id_str
     context.user_data['story_id'] = story_id
+    context.user_data['secret_key'] = secret_key
 
     if title.lower().endswith("(нейро)"):
         clean_title = title[:-7].strip()
@@ -7212,15 +7226,11 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data['current_story'] = {
         "title": title,
-        "author": username,  # <--- Сохраняем имя автора
-        "owner_id": user_id_str,  # <--- Сохраняем владельца
-        "fragments": {
-            "main_1": {
-                "text": "(пусто)",
-                "media": [],
-                "choices": []
-            }
-        }
+        "author": username,
+        "owner_id": user_id_str,
+        "story_id": story_id,
+        "secret_key": secret_key,   # ← ВАЖНО
+        "fragments": {}
     }
     context.user_data['current_fragment_id'] = "main_1"
     context.user_data['next_choice_index'] = 1
@@ -7228,16 +7238,10 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Сохраняем начальную версию истории
     save_current_story_from_context(context)
 
-    # Собираем клавиатуру
-    keyboard_buttons = [
-        [InlineKeyboardButton("🌃В Главное Меню🌃", callback_data='restart_callback')],
-        [InlineKeyboardButton(
-            "🛠️ Открыть веб редактор",
-            web_app=WebAppInfo(url=f"https://novel-qg4c.onrender.com/{user_id_str}_{story_id}")
-        )]
-    ]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌃В Главное Меню🌃", callback_data='restart_callback')]
+    ])
 
-    keyboard = InlineKeyboardMarkup(keyboard_buttons)
     message_text = (
         f"<b>Отлично!</b>\n"
         f"Название истории: <b>{escaped_title}</b>\n"
@@ -7246,8 +7250,7 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"<i>Им будет достаточно просто отправить этот ID боту, и бот тут же запустит вашу историю.</i>\n\n"
         f"<b>Теперь отправьте контент для первого фрагмента.</b>\n"
         f"<i>Это может быть текст, фото (с подписью или без), видео, GIF или аудио.</i>\n"
-        f"<i>Поддерживается вся доступная в телеграм разметка, например спойлеры. А также тэги для автоматической смены слайдов и редактирования текста. Для подробностей пройдите обучение из главного меню.</i>\n\n"
-        f"<i>Кроме того сейчас или позже вы можете переключиться на создание истории через удобный онлайн редактор в виде интерактивной карты.</i>"       
+        f"<i>Поддерживается вся доступная в телеграм разметка, например спойлеры. А также тэги для автоматической смены слайдов и редактирования текста. Для подробностей пройдите обучение из главного меню.</i>"
     )
 
     await update.message.reply_text(
@@ -7257,6 +7260,7 @@ async def ask_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
     return ADD_CONTENT
+
 
 
 async def confirm_replace_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -12820,6 +12824,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
