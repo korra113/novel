@@ -4,6 +4,8 @@ import os
 import re
 import requests
 import logging
+import secrets
+import string
 
 # --- КОНФИГУРАЦИЯ ---
 BUILD_FOLDER = os.path.join(os.path.dirname(__file__), 'client', 'build')
