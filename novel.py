@@ -10775,6 +10775,91 @@ async def confirm_delete_story(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- Логика статов ---
 
 
+
+
+
+def get_html_progress_ref_path(story_id: str, user_id: int) -> str:
+    """Возвращает путь к данным прогресса HTML-версии (ключ HTMLstory_settings)."""
+    return f'HTMLstory_settings/{story_id}/{user_id}'
+
+def load_html_story_progress(story_id: str, user_id: int) -> dict:
+    """Загружает прогресс HTML-версии."""
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase не инициализирован.")
+            return {}
+            
+        # Используем новый путь HTMLstory_settings
+        ref = db.reference(get_html_progress_ref_path(story_id, user_id))
+        data = ref.get()
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.error(f"Ошибка загрузки HTML прогресса {story_id}/{user_id}: {e}")
+        return {}
+
+def save_html_story_progress(story_id: str, user_id: int, progress_data: dict) -> None:
+    """Сохраняет прогресс HTML-версии."""
+    try:
+        if not firebase_admin._DEFAULT_APP_NAME:
+            logger.error("Firebase не инициализирован.")
+            return
+            
+        # Используем новый путь HTMLstory_settings
+        ref = db.reference(get_html_progress_ref_path(story_id, user_id))
+        ref.set(progress_data)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения HTML прогресса {story_id}/{user_id}: {e}")
+
+def delete_html_story_progress(story_id: str, user_id: int) -> None:
+    """Полностью удаляет текущий прогресс прохождения."""
+    try:
+        ref = db.reference(get_html_progress_ref_path(story_id, user_id))
+        ref.delete()
+    except Exception as e:
+        logger.error(f"Ошибка удаления прогресса {story_id}/{user_id}: {e}")
+
+def get_html_saves_ref_path(story_id: str, user_id: int) -> str:
+    return f'HTMLstory_saves/{story_id}/{user_id}'
+
+def save_html_game_slot(story_id: str, user_id: int, save_data: dict) -> str:
+    """Создает слот сохранения."""
+    try:
+        ref = db.reference(get_html_saves_ref_path(story_id, user_id))
+        # Генерируем уникальный ID для сохранения на основе времени
+        save_id = str(int(time.time() * 1000))
+        
+        # Добавляем серверное время, если его нет
+        save_data['timestamp'] = int(time.time() * 1000)
+        
+        ref.child(save_id).set(save_data)
+        return save_id
+    except Exception as e:
+        logger.error(f"Ошибка создания сохранения {story_id}/{user_id}: {e}")
+        return None
+
+def get_html_save_slots(story_id: str, user_id: int) -> dict:
+    """Получает список сохранений."""
+    try:
+        ref = db.reference(get_html_saves_ref_path(story_id, user_id))
+        data = ref.get()
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.error(f"Ошибка получения сохранений {story_id}/{user_id}: {e}")
+        return {}
+
+def delete_html_save_slot(story_id: str, user_id: int, save_id: str) -> None:
+    """Удаляет конкретный слот сохранения."""
+    try:
+        ref = db.reference(f'{get_html_saves_ref_path(story_id, user_id)}/{save_id}')
+        ref.delete()
+    except Exception as e:
+        logger.error(f"Ошибка удаления сохранения {save_id}: {e}")
+
+
+
+
+
+
 MAX_ALERT_LENGTH = 200 # Лимит Telegram для show_alert
 
 # --- Новые вспомогательные функции для Firebase (прогресс пользователя в истории) ---
@@ -10821,8 +10906,6 @@ def clear_user_story_complete_progress(story_id: str, user_id: int) -> None:
         logger.info(f"Полностью очищен прогресс для истории {story_id}, пользователя {user_id}.")
     except Exception as e:
         logger.error(f"Ошибка Firebase при полной очистке прогресса пользователя story {story_id}, user {user_id}: {e}")
-
-# --- Новые вспомогательные функции для обработки эффектов ---
 
 # --- Новые вспомогательные функции для обработки эффектов ---
 
@@ -10878,6 +10961,8 @@ def _get_random_value_from_range(
         return random.choice(all_numbers)
         
     return random.choices(all_numbers, weights=weights, k=1)[0]
+
+
 
 
 
@@ -11059,8 +11144,6 @@ async def process_choice_effects_on_click(
     
     return True, alert_text, False
 
-
-
 def evaluate_choice_for_display(
     story_id: str,
     user_id: int,
@@ -11107,6 +11190,7 @@ def evaluate_choice_for_display(
     
     req_text = f" ({', '.join(requirement_parts)})" if requirement_parts else ""
     return True, req_text
+
 
 
 
@@ -11217,6 +11301,7 @@ def apply_effect_values(base_text, effects_dict):
 
     logger.info(f"text: {text}")
     return text
+
 
 # --- Логика создания истории (ConversationHandler) ---
 
@@ -13044,6 +13129,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
