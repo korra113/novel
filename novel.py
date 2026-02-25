@@ -12889,6 +12889,89 @@ async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+from requests import Session
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
+import io
+# Вспомогательная функция для извлечения ID видео из ссылки
+def get_video_id(url):
+    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
+    match = re.search(regex, url)
+    return match.group(1) if match else None
+
+async def ytxt_command(update, context):
+    if not context.args:
+        await update.message.reply_text("Пожалуйста, укажите ссылку: /ytxt https://youtube.com/...")
+        return
+
+    video_url = context.args[0]
+    video_id = get_video_id(video_url)
+
+    if not video_id:
+        await update.message.reply_text("Не удалось извлечь ID видео. Проверьте ссылку.")
+        return
+
+    status_message = await update.message.reply_text("Скачиваю расшифровку...")
+
+    try:
+        # 1. Создаем кастомную сессию requests
+        http_client = Session()
+        
+        # 2. Добавляем куки и User-Agent
+        # Куки лучше хранить в переменных окружения на Render.com (Environment Variables),
+        # чтобы не "светить" их в коде.
+        # Замените 'ВАШИ_КУКИ_ЗДЕСЬ' на вашу строку куки или берите из os.getenv
+        youtube_cookies = os.environ.get("YOUTUBE_COOKIES")
+
+        if not youtube_cookies:
+            raise ValueError("Переменная окружения YOUTUBE_COOKIES не установлена")
+        
+        http_client.headers.update({
+            "Cookie": youtube_cookies,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+        })
+
+        # 3. Передаем нашу сессию с куками в API
+        ytt_api = YouTubeTranscriptApi(http_client=http_client)
+        
+        # Получаем транскрипцию
+        transcript = ytt_api.fetch(video_id, languages=['ru', 'en'])
+
+        formatter = TextFormatter()
+        text_formatted = formatter.format_transcript(transcript)
+
+        file_buffer = io.BytesIO(text_formatted.encode('utf-8'))
+        file_buffer.name = f"transcript_{video_id}.txt"
+
+        await update.message.reply_document(
+            document=file_buffer,
+            caption=f"Расшифровка для видео {video_id}"
+        )
+        
+        await status_message.delete()
+
+    except Exception as e:
+        error_text = f"Ошибка при получении транскрипции:\n{str(e)}"
+        
+        if "TranscriptsDisabled" in str(e):
+            error_text = "Субтитры для этого видео отключены."
+        elif "NoTranscriptFound" in str(e):
+            error_text = "Не найдено субтитров на русском или английском языке."
+            
+        await status_message.edit_text(error_text)
+
+
+
+
+
+
+
+
+
+
+
 def main() -> None:
     """Запуск бота."""
 
@@ -13129,6 +13212,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
