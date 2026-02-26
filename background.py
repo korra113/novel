@@ -1339,6 +1339,25 @@ def validate_access_route():
 
 
 #---------------------------------------------------------------- --- TUTORIAL SYSTEM START ---
+@app.route('/api/faq_tree', methods=['GET'])
+def get_faq_tree_route():
+    from novel import get_faq_tree_data
+    return jsonify(get_faq_tree_data())
+
+@app.route('/api/faq_tree', methods=['POST'])
+def save_faq_tree_route():
+    from novel import save_faq_tree_data
+    data = request.get_json()
+    admin_id = data.get('admin_id')
+    tree_string = data.get('tree') # Это строка (JSON.stringify), чтобы избежать поломок массивов в Firebase
+
+    if str(admin_id) != "6217936347":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    success = save_faq_tree_data(tree_string)
+    if success:
+        return jsonify({"status": "ok"})
+    return jsonify({"error": "Failed to save"}), 500
 
 
 @app.route('/api/tutorials', methods=['GET'])
