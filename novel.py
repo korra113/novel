@@ -12909,76 +12909,6 @@ async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-from requests import Session
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import TextFormatter
-import io
-# Вспомогательная функция для извлечения ID видео из ссылки
-def get_video_id(url):
-    # Простейшая регулярка для отлова ID из стандартных ссылок и youtu.be
-    # Ищет 11 символов после 'v=' или после слэша
-    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
-    match = re.search(regex, url)
-    return match.group(1) if match else None
-
-async def ytxt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем, прислал ли пользователь ссылку
-    if not context.args:
-        await update.message.reply_text("Пожалуйста, укажите ссылку: /ytxt https://youtube.com/...")
-        return
-
-    video_url = context.args[0]
-    video_id = get_video_id(video_url)
-
-    if not video_id:
-        await update.message.reply_text("Не удалось извлечь ID видео. Проверьте ссылку.")
-        return
-
-    status_message = await update.message.reply_text("Скачиваю расшифровку...")
-
-    try:
-        # Инициализация API
-        ytt_api = YouTubeTranscriptApi()
-        
-        # Получаем транскрипцию. 
-        # languages=['ru', 'en'] означает: "дай русскую, если нет - дай английскую"
-        # Согласно документации, если видео не имеет этих языков, возникнет ошибка.
-        transcript = ytt_api.fetch(video_id, languages=['ru', 'en'])
-
-        # Форматируем в обычный текст (убираем таймкоды и JSON структуру)
-        # Используем TextFormatter из документации
-        formatter = TextFormatter()
-        text_formatted = formatter.format_transcript(transcript)
-
-        # Создаем файл в памяти (чтобы не сохранять мусор на диск)
-        file_buffer = io.BytesIO(text_formatted.encode('utf-8'))
-        file_buffer.name = f"transcript_{video_id}.txt"
-
-        # Отправляем файл пользователю
-        await update.message.reply_document(
-            document=file_buffer,
-            caption=f"Расшифровка для видео {video_id}"
-        )
-        
-        # Удаляем сообщение "Скачиваю..."
-        await status_message.delete()
-
-    except Exception as e:
-        # Обработка ошибок (например, если субтитры отключены или видео недоступно)
-        error_text = f"Ошибка при получении транскрипции:\n{str(e)}"
-        
-        # Часто встречающиеся ошибки в этой библиотеке
-        if "TranscriptsDisabled" in str(e):
-            error_text = "Субтитры для этого видео отключены."
-        elif "NoTranscriptFound" in str(e):
-            error_text = "Не найдено субтитров на русском или английском языке."
-            
-        await status_message.edit_text(error_text)
-
-
-
-
-
 
 
 
@@ -13223,6 +13153,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
