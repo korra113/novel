@@ -469,6 +469,25 @@ async def handle_admin_json_file(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"Ошибка при обработке: {e}")
         return ADMIN_UPLOAD
 
+def get_faq_tree_data():
+    """Получает структуру дерева FAQ (в виде JSON-строки) из БД."""
+    try:
+        ref = db.reference('sys_faq/tree_string')
+        data = ref.get()
+        return {"tree": data if data else "[]"}
+    except Exception as e:
+        logger.error(f"Error getting FAQ tree: {e}")
+        return {"tree": "[]"}
+
+def save_faq_tree_data(tree_string):
+    """Сохраняет структуру дерева FAQ (как JSON-строку) в БД."""
+    try:
+        ref = db.reference('sys_faq/tree_string')
+        ref.set(tree_string)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving FAQ tree: {e}")
+        return False
 
 
 
@@ -13204,6 +13223,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
